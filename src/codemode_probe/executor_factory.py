@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 from codemode_probe.executors import (
     CandidateExecutor,
+    CodeModeSyntheticScriptedExecutor,
     DeterministicOracleExecutor,
     DirectMcpAgentParallelExecutor,
     DirectMcpToolOracleExecutor,
@@ -21,6 +22,7 @@ EXECUTOR_ALIASES = {
     "in_process": "in_process_tool_oracle",
     "direct_mcp": "direct_mcp_tool_oracle",
     "direct_agent": "direct_mcp_agent_parallel",
+    "code_mode": "code_mode_synthetic_scripted",
 }
 
 
@@ -30,6 +32,7 @@ def available_executor_ids() -> tuple[str, ...]:
         "in_process_tool_oracle",
         "direct_mcp_tool_oracle",
         "direct_mcp_agent_parallel",
+        "code_mode_synthetic_scripted",
     )
 
 
@@ -50,6 +53,8 @@ def build_executor(executor_id: str, task: ProbeTask) -> CandidateExecutor:
             _direct_mcp_tool_client(task),
             ProviderBackedModelClient(ScriptedProviderClient()),
         )
+    if normalized == "code_mode_synthetic_scripted":
+        return CodeModeSyntheticScriptedExecutor()
     raise ValueError(f"unknown executor id: {executor_id}")
 
 

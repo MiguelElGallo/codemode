@@ -1,0 +1,129 @@
+from __future__ import annotations
+
+import importlib.machinery
+import tomllib
+from pathlib import Path
+
+import pytest
+
+from codemode_probe.provider_config import (
+    LiveProvider,
+    ProviderConfigError,
+    anthropic_config,
+    openai_config,
+)
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def test_openai_config_defaults_to_disabled_live_provider() -> None:
+    config = openai_config()
+
+    assert config.provider == LiveProvider.OPENAI
+    assert config.model == "gpt-4.1-mini"
+    assert config.enabled is False
+    assert config.api_key_env_var == "OPENAI_API_KEY"
+    assert config.timeout_seconds == 60.0
+    assert config.temperature == 0.0
+    assert config.sdk_package == "openai"
+
+
+def test_anthropic_config_defaults_to_disabled_live_provider() -> None:
+    config = anthropic_config()
+
+    assert config.provider == LiveProvider.ANTHROPIC
+    assert config.model == "claude-sonnet-4-5"
+    assert config.enabled is False
+    assert config.api_key_env_var == "ANTHROPIC_API_KEY"
+    assert config.timeout_seconds == 60.0
+    assert config.temperature == 0.0
+    assert config.sdk_package == "anthropic"
+
+
+def test_disabled_live_config_errors_before_sdk_or_env_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    def fail_find_spec(package: str) -> None:
+        raise AssertionError(f"disabled config should not inspect SDK package {package}")
+
+    monkeypatch.setattr("importlib.util.find_spec", fail_find_spec)
+
+    with pytest.raises(ProviderConfigError, match="live provider 'openai' is disabled"):
+        openai_config(enabled=False).validate_for_live_use()
+
+
+def test_missing_sdk_error_uses_provider_package_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("importlib.util.find_spec", lambda package: None)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    with pytest.raises(
+        ProviderConfigError,
+        match="optional SDK package 'anthropic' is not installed",
+    ):
+        anthropic_config(enabled=True).validate_for_live_use()
+
+
+def test_missing_env_var_error_after_sdk_presence(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "importlib.util.find_spec",
+        lambda package: importlib.machinery.ModuleSpec(package, loader=None),
+    )
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    with pytest.raises(
+        ProviderConfigError,
+        match="required API key environment variable 'OPENAI_API_KEY' is not set",
+    ):
+        openai_config(enabled=True).validate_for_live_use()
+
+
+@pytest.mark.parametrize(
+    ("config", "package", "env_var"),
+    [
+        (openai_config(enabled=True), "openai", "OPENAI_API_KEY"),
+        (anthropic_config(enabled=True), "anthropic", "ANTHROPIC_API_KEY"),
+    ],
+)
+def test_env_var_success_path_with_mocked_sdk_presence(
+    monkeypatch: pytest.MonkeyPatch,
+    config,
+    package: str,
+    env_var: str,
+) -> None:
+    checked_packages: list[str] = []
+
+    def fake_find_spec(candidate: str) -> importlib.machinery.ModuleSpec:
+        checked_packages.append(candidate)
+        return importlib.machinery.ModuleSpec(candidate, loader=None)
+
+    monkeypatch.setattr("importlib.util.find_spec", fake_find_spec)
+    monkeypatch.setenv(env_var, "test-key")
+
+    config.validate_for_live_use()
+
+    assert checked_packages == [package]
+
+
+def test_providers_extra_is_declared_in_project_metadata_and_lockfile() -> None:
+    with (repo_root() / "pyproject.toml").open("rb") as pyproject_file:
+        pyproject = tomllib.load(pyproject_file)
+    with (repo_root() / "uv.lock").open("rb") as lock_file:
+        uv_lock = tomllib.load(lock_file)
+
+    assert pyproject["project"]["optional-dependencies"]["providers"] == [
+        "anthropic>=0.74",
+        "openai>=2.0",
+    ]
+
+    package = next(
+        package
+        for package in uv_lock["package"]
+        if package["name"] == "codemode-probe"
+    )
+    assert package["optional-dependencies"]["providers"] == [
+        {"name": "anthropic"},
+        {"name": "openai"},
+    ]
+    assert "providers" in package["metadata"]["provides-extras"]

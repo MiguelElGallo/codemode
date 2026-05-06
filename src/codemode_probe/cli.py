@@ -40,6 +40,11 @@ def main() -> None:
     parser.add_argument("--timeout-seconds", type=float, default=60.0)
     parser.add_argument("--arm-order", choices=["fixed", "randomized"], default="fixed")
     parser.add_argument("--random-seed", type=int, default=1)
+    parser.add_argument(
+        "--paired-baseline-arm",
+        default="direct_mcp_agent_parallel",
+        help="Executor id used as the baseline in paired_deltas.json.",
+    )
     args = parser.parse_args()
 
     tasks = _tasks_from_args(args)
@@ -49,6 +54,7 @@ def main() -> None:
         repetitions=args.repetitions,
         arm_order=args.arm_order,
         random_seed=args.random_seed,
+        paired_baseline_arm=args.paired_baseline_arm,
     )
     results = run_benchmark_suite(tasks, suite_config)
 

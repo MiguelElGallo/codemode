@@ -43,6 +43,26 @@ class InProcessToolOracleExecutor:
         return run_tool_oracle(task, tools)
 
 
+class CodeModeSyntheticScriptedExecutor:
+    name = "code_mode_synthetic_scripted"
+
+    def execute(self, task: ProbeTask) -> ExecutionResult:
+        tools = InProcessSyntheticTools(
+            generate_candidates(task.workload),
+            tool_outputs_model_visible=False,
+        )
+        execution = run_tool_oracle(task, tools)
+        return execution.model_copy(
+            update={
+                "raw": {
+                    **execution.raw,
+                    "code_mode": "synthetic_scripted",
+                    "tool_outputs_model_visible": False,
+                }
+            }
+        )
+
+
 class DirectMcpToolOracleExecutor:
     name = "direct_mcp_tool_oracle"
 

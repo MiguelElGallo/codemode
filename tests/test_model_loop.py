@@ -15,6 +15,7 @@ from codemode_probe.model_loop import DirectMcpAgentExecutor, ScriptedFanoutMode
 from codemode_probe.models import (
     ModelTurnRequest,
     ModelTurnResult,
+    FailureCategory,
     NormalizedModelUsage,
     NormalizedToolRequest,
     NormalizedToolResult,
@@ -280,6 +281,15 @@ class FailingToolModelClient:
         )
 
 
+class InvalidFinalAnswerModelClient:
+    async def run_turn(self, request: ModelTurnRequest) -> ModelTurnResult:
+        return ModelTurnResult(
+            final_answer={"task_id": request.task.id, "candidates": [{"id": "missing-score"}]},
+            usage=NormalizedModelUsage(input_tokens=1, output_tokens=1),
+            raw={"turn": "invalid_final"},
+        )
+
+
 def test_direct_mcp_agent_executor_counts_unknown_and_failed_tools() -> None:
     task = tiny_task(task_id="failed-tools")
 
@@ -313,7 +323,7 @@ def test_direct_mcp_agent_executor_counts_failed_tools_against_budget() -> None:
 
     assert result.answer is None
     assert result.error == "max_tool_calls_exceeded"
-    assert result.trace.failure_category == "tool_budget_exceeded"
+    assert result.trace.failure_category == FailureCategory.TOOL_BUDGET_EXCEEDED
     assert result.usage.model_requests == 1
     assert result.usage.tool_calls == 0
     assert result.usage.failed_tool_calls == 0
@@ -329,7 +339,7 @@ def test_direct_mcp_agent_executor_stops_before_exceeding_tool_budget() -> None:
 
     assert result.answer is None
     assert result.error == "max_tool_calls_exceeded"
-    assert result.trace.failure_category == "tool_budget_exceeded"
+    assert result.trace.failure_category == FailureCategory.TOOL_BUDGET_EXCEEDED
     assert result.usage.model_requests == 2
     assert result.usage.tool_calls == 2
     assert result.usage.failed_tool_calls == 0
@@ -343,6 +353,21 @@ def test_direct_mcp_agent_executor_stops_before_exceeding_tool_budget() -> None:
         "search_shards",
         "fetch_candidates",
     ]
+
+
+def test_direct_mcp_agent_executor_classifies_invalid_final_answer_schema() -> None:
+    task = tiny_task(task_id="invalid-final")
+
+    result = DirectMcpAgentExecutor(
+        InProcessSyntheticTools.from_task(task),
+        InvalidFinalAnswerModelClient(),
+    ).execute(task)
+
+    assert result.answer is None
+    assert result.error == "final_answer_schema_invalid"
+    assert result.trace.failure_category == FailureCategory.SCHEMA_FAILURE
+    assert result.usage.model_requests == 1
+    assert result.usage.tool_calls == 0
 
 
 def test_benchmark_runner_scores_direct_mcp_agent_parallel_executor() -> None:

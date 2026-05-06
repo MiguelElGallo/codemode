@@ -33,9 +33,10 @@ SYNTHETIC_TOOL_SPECS = (
 
 
 class InProcessSyntheticTools:
-    def __init__(self, candidates: list[Candidate]) -> None:
+    def __init__(self, candidates: list[Candidate], *, tool_outputs_model_visible: bool = True) -> None:
         self._candidates = {candidate.id: candidate for candidate in candidates}
         self._shards = candidates_by_shard(candidates)
+        self._tool_outputs_model_visible = tool_outputs_model_visible
         self.calls: list[ToolCallRecord] = []
 
     @classmethod
@@ -47,28 +48,28 @@ class InProcessSyntheticTools:
         if limit is not None:
             candidates = candidates[:limit]
         response = [_summary(candidate) for candidate in candidates]
-        self._record("search_shard", response, model_visible=True)
+        self._record("search_shard", response)
         return response
 
     async def fetch_candidate(self, candidate_id: str) -> dict[str, object]:
         candidate = self._candidates[candidate_id]
         response = candidate.model_dump(mode="json")
-        self._record("fetch_candidate", response, model_visible=True)
+        self._record("fetch_candidate", response)
         return response
 
     async def fetch_candidates(self, candidate_ids: Iterable[str]) -> list[dict[str, object]]:
         response = [self._candidates[candidate_id].model_dump(mode="json") for candidate_id in candidate_ids]
-        self._record("fetch_candidates", response, model_visible=True)
+        self._record("fetch_candidates", response)
         return response
 
-    def _record(self, tool_name: str, response: object, *, model_visible: bool) -> None:
+    def _record(self, tool_name: str, response: object) -> None:
         encoded = _json_bytes(response)
         item_count = len(response) if isinstance(response, list) else 1
         self.calls.append(
             ToolCallRecord(
                 tool_name=tool_name,
                 response_bytes=len(encoded),
-                model_visible=model_visible,
+                model_visible=self._tool_outputs_model_visible,
                 item_count=item_count,
             )
         )

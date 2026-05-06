@@ -10,6 +10,11 @@ from codemode_probe.suite import BenchmarkSuiteConfig, run_benchmark_suite
 from codemode_probe.workload import make_probe_task
 
 
+class FakeArmResult(SimpleNamespace):
+    def model_copy(self, *, update: dict[str, object]) -> "FakeArmResult":
+        return FakeArmResult(**{**self.__dict__, **update})
+
+
 def tiny_task(task_id: str, *, seed: int = 11, tool_shape: ToolShape = ToolShape.SCALAR) -> ProbeTask:
     return make_probe_task(
         task_id,
@@ -43,6 +48,12 @@ def test_benchmark_suite_config_normalizes_arm_aliases() -> None:
     )
 
 
+def test_benchmark_suite_config_normalizes_paired_baseline_alias() -> None:
+    config = BenchmarkSuiteConfig(paired_baseline_arm="direct_agent")
+
+    assert config.normalized_paired_baseline_arm == "direct_mcp_agent_parallel"
+
+
 def test_suite_fixed_order_is_stable_across_tasks_and_repetitions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -54,7 +65,7 @@ def test_suite_fixed_order_is_stable_across_tasks_and_repetitions(
 
         def run_task(self, task: ProbeTask, *, repetition: int = 1) -> SimpleNamespace:
             calls.append((task.id, self.executor.name, repetition))
-            return SimpleNamespace(
+            return FakeArmResult(
                 task_id=task.id,
                 arm_name=self.executor.name,
                 repetition=repetition,
@@ -95,7 +106,7 @@ def test_suite_randomized_order_is_deterministic_by_seed(
             self.executor = executor
 
         def run_task(self, task: ProbeTask, *, repetition: int = 1) -> SimpleNamespace:
-            return SimpleNamespace(
+            return FakeArmResult(
                 task_id=task.id,
                 arm_name=self.executor.name,
                 repetition=repetition,
@@ -134,6 +145,29 @@ def test_suite_randomized_order_is_deterministic_by_seed(
     ]
 
 
+def test_suite_records_trial_identity_and_arm_execution_order() -> None:
+    task = tiny_task("trial-task", seed=1)
+
+    results = run_benchmark_suite(
+        [task],
+        BenchmarkSuiteConfig(
+            arms=("direct_agent", "in_process", "deterministic_oracle"),
+            repetitions=1,
+            arm_order="fixed",
+        ),
+    )
+
+    assert [result.trial_id for result in results] == ["trial-task:rep-1"] * 3
+    assert [result.arm_order_index for result in results] == [0, 1, 2]
+    assert {result.arm_order for result in results} == {
+        (
+            "direct_mcp_agent_parallel",
+            "in_process_tool_oracle",
+            "deterministic_oracle_client",
+        )
+    }
+
+
 def test_suite_builds_fresh_direct_mcp_agent_parallel_executor_per_repetition() -> None:
     task = tiny_task("direct-agent-suite", tool_shape=ToolShape.BATCH)
 
@@ -170,4 +204,22 @@ def test_suite_validates_arms_before_running_any_task(monkeypatch: pytest.Monkey
         run_benchmark_suite(
             [tiny_task("bad-arm")],
             BenchmarkSuiteConfig(arms=("deterministic_oracle", "not-an-arm")),
+        )
+
+
+def test_suite_validates_paired_baseline_before_running_any_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_called(arm: str, task: ProbeTask) -> object:
+        raise AssertionError("build_executor should not be called for invalid suite config")
+
+    monkeypatch.setattr(suite, "build_executor", fail_if_called)
+
+    with pytest.raises(
+        ValueError,
+        match="unknown paired baseline executor id: not-an-arm",
+    ):
+        run_benchmark_suite(
+            [tiny_task("bad-baseline")],
+            BenchmarkSuiteConfig(paired_baseline_arm="not-an-arm"),
         )

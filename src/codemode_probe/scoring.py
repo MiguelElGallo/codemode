@@ -4,7 +4,7 @@ import math
 
 from pydantic import ValidationError
 
-from codemode_probe.models import ScoreResult, StructuredAnswer
+from codemode_probe.models import ScoreFailureReason, ScoreResult, StructuredAnswer
 
 
 def score_answer(
@@ -22,7 +22,7 @@ def score_answer(
             precision_at_k=0.0,
             recall_at_k=0.0,
             ndcg_at_k=0.0,
-            failure_reason="schema_invalid",
+            failure_reason=ScoreFailureReason.SCHEMA_INVALID,
         )
 
     if parsed.task_id != oracle.task_id:
@@ -33,7 +33,7 @@ def score_answer(
             precision_at_k=0.0,
             recall_at_k=0.0,
             ndcg_at_k=0.0,
-            failure_reason="task_id_mismatch",
+            failure_reason=ScoreFailureReason.TASK_ID_MISMATCH,
         )
 
     expected_ids = [candidate.id for candidate in oracle.candidates]
@@ -50,7 +50,7 @@ def score_answer(
         precision_at_k=overlap / max(1, len(actual_ids)),
         recall_at_k=overlap / k,
         ndcg_at_k=_ndcg(actual_ids, expected_ids),
-        failure_reason="timeout" if timed_out else None,
+        failure_reason=ScoreFailureReason.TIMEOUT if timed_out else None,
     )
 
 

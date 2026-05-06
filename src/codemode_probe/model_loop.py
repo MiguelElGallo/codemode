@@ -6,6 +6,7 @@ from typing import Protocol
 from codemode_probe.models import (
     Candidate,
     ExecutionResult,
+    FailureCategory,
     ModelTurnRequest,
     ModelTurnResult,
     NormalizedModelUsage,
@@ -54,7 +55,18 @@ class DirectMcpAgentExecutor:
             model_turns.append(model_result.raw)
 
             if model_result.final_answer is not None:
-                answer = _parse_final_answer(model_result.final_answer)
+                try:
+                    answer = _parse_final_answer(model_result.final_answer)
+                except Exception:
+                    return self._execution_result(
+                        answer=None,
+                        model_requests=turn_index,
+                        failed_tool_calls=failed_tool_calls,
+                        model_usage=model_usage,
+                        model_turns=model_turns,
+                        error="final_answer_schema_invalid",
+                        failure_category=FailureCategory.SCHEMA_FAILURE,
+                    )
                 return self._execution_result(
                     answer=answer,
                     model_requests=turn_index,
@@ -72,7 +84,7 @@ class DirectMcpAgentExecutor:
                     model_usage=model_usage,
                     model_turns=model_turns,
                     error="model_returned_no_tool_requests_or_final_answer",
-                    failure_category="model_protocol_error",
+                    failure_category=FailureCategory.MODEL_PROTOCOL_ERROR,
                 )
 
             if attempted_tool_calls + requested_count > task.max_tool_calls:
@@ -84,7 +96,7 @@ class DirectMcpAgentExecutor:
                     model_usage=model_usage,
                     model_turns=model_turns,
                     error="max_tool_calls_exceeded",
-                    failure_category="tool_budget_exceeded",
+                    failure_category=FailureCategory.TOOL_BUDGET_EXCEEDED,
                 )
 
             turn_tool_results = await asyncio.gather(
@@ -102,7 +114,7 @@ class DirectMcpAgentExecutor:
             model_usage=model_usage,
             model_turns=model_turns,
             error="model_loop_exhausted",
-            failure_category="model_protocol_error",
+            failure_category=FailureCategory.MODEL_PROTOCOL_ERROR,
         )
 
     async def _dispatch_tool(self, request: NormalizedToolRequest) -> NormalizedToolResult:
@@ -129,7 +141,7 @@ class DirectMcpAgentExecutor:
         model_usage: "_UsageAccumulator",
         model_turns: list[dict[str, object]],
         error: str | None = None,
-        failure_category: str | None = None,
+        failure_category: FailureCategory | None = None,
     ) -> ExecutionResult:
         tool_response_bytes = sum(call.response_bytes for call in self._tool_client.calls)
         model_visible_bytes = sum(

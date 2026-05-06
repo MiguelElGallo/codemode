@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from statistics import median
 
 from codemode_probe.models import ArmResult, ProbeTask
@@ -16,7 +17,11 @@ def summarize_results(results: list[ArmResult]) -> dict[str, object]:
     return {"schema_version": 1, "arms": arms}
 
 
-def render_summary_markdown(results: list[ArmResult]) -> str:
+def render_summary_markdown(
+    results: list[ArmResult],
+    *,
+    paired_baseline_arm: str = "direct_mcp_agent_parallel",
+) -> str:
     summary = summarize_results(results)
     lines = [
         "# Benchmark Summary",
@@ -49,7 +54,7 @@ def render_summary_markdown(results: list[ArmResult]) -> str:
         [
             "",
             "Payload suppression is `1 - model_visible_bytes_total / tool_response_bytes_total`.",
-            "Pairwise deltas use `direct_mcp_agent_parallel` as the default baseline when present.",
+            f"Pairwise deltas use `{paired_baseline_arm}` as the baseline when present.",
             "Cold/warm cache cohorts are not separated in this run metadata yet.",
             "",
         ]
@@ -62,13 +67,18 @@ def summarize_paired_deltas(
     *,
     baseline_arm: str,
 ) -> list[dict[str, object]]:
-    by_key: dict[tuple[str, int], dict[str, ArmResult]] = {}
+    by_key: dict[tuple[str, int, str | None], dict[str, ArmResult]] = {}
     for result in results:
-        by_key.setdefault((result.task_id, result.repetition), {})[result.arm_name] = result
+        by_key.setdefault(
+            (result.task_id, result.repetition, result.trial_id), {}
+        )[result.arm_name] = result
 
     rows: list[dict[str, object]] = []
-    for task_id, repetition in sorted(by_key):
-        arm_results = by_key[(task_id, repetition)]
+    for task_id, repetition, trial_id in sorted(
+        by_key,
+        key=lambda key: (key[0], key[1], key[2] or ""),
+    ):
+        arm_results = by_key[(task_id, repetition, trial_id)]
         baseline = arm_results.get(baseline_arm)
         if baseline is None:
             continue
@@ -78,6 +88,54 @@ def summarize_paired_deltas(
             comparison = arm_results[arm_name]
             rows.append(_paired_delta_row(task_id, repetition, baseline, comparison))
     return rows
+
+
+def summarize_paired_delta_groups(
+    paired_deltas: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    groups: dict[tuple[str, str], list[dict[str, object]]] = {}
+    for row in paired_deltas:
+        groups.setdefault(
+            (str(row["baseline_arm"]), str(row["comparison_arm"])),
+            [],
+        ).append(row)
+
+    summaries: list[dict[str, object]] = []
+    for baseline_arm, comparison_arm in sorted(groups):
+        rows = groups[(baseline_arm, comparison_arm)]
+        summaries.append(
+            {
+                "baseline_arm": baseline_arm,
+                "comparison_arm": comparison_arm,
+                "pairs": len(rows),
+                "mean_delta_ndcg_at_k": _mean(
+                    [float(row["delta_ndcg_at_k"]) for row in rows]
+                ),
+                "mean_delta_top_k_overlap": _mean(
+                    [float(row["delta_top_k_overlap"]) for row in rows]
+                ),
+                "median_delta_latency_ms": round(
+                    median(float(row["delta_latency_ms"]) for row in rows),
+                    3,
+                ),
+                "mean_delta_latency_ms": _mean(
+                    [float(row["delta_latency_ms"]) for row in rows]
+                ),
+                "mean_delta_model_requests": _mean(
+                    [float(row["delta_model_requests"]) for row in rows]
+                ),
+                "mean_delta_tool_calls": _mean(
+                    [float(row["delta_tool_calls"]) for row in rows]
+                ),
+                "mean_delta_tool_response_bytes": _mean(
+                    [float(row["delta_tool_response_bytes"]) for row in rows]
+                ),
+                "mean_delta_model_visible_bytes": _mean(
+                    [float(row["delta_model_visible_bytes"]) for row in rows]
+                ),
+            }
+        )
+    return summaries
 
 
 def summarize_workload_regimes(
@@ -207,9 +265,14 @@ def _paired_delta_row(
 ) -> dict[str, object]:
     baseline_visible_fraction = _visible_fraction(baseline)
     comparison_visible_fraction = _visible_fraction(comparison)
+    arm_order = baseline.arm_order or comparison.arm_order
     return {
         "task_id": task_id,
         "repetition": repetition,
+        "trial_id": baseline.trial_id,
+        "arm_order": list(arm_order),
+        "baseline_arm_order_index": baseline.arm_order_index,
+        "comparison_arm_order_index": comparison.arm_order_index,
         "baseline_arm": baseline.arm_name,
         "comparison_arm": comparison.arm_name,
         "delta_ndcg_at_k": round(comparison.score.ndcg_at_k - baseline.score.ndcg_at_k, 6),
@@ -267,7 +330,7 @@ def _percentile(values: list[float], percentile: float) -> float:
     if not values:
         return 0.0
     sorted_values = sorted(values)
-    index = max(0, min(len(sorted_values) - 1, int((len(sorted_values) - 1) * percentile)))
+    index = max(0, min(len(sorted_values) - 1, math.ceil(len(sorted_values) * percentile) - 1))
     return round(sorted_values[index], 3)
 
 

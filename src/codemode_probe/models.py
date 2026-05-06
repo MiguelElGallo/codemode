@@ -19,6 +19,24 @@ class ToolShape(StrEnum):
     BATCH = "batch"
 
 
+class FailureCategory(StrEnum):
+    PROVIDER_FAILURE = "provider_failure"
+    MODEL_PROTOCOL_ERROR = "model_protocol_error"
+    SCHEMA_FAILURE = "schema_failure"
+    SCORING_FAILURE = "scoring_failure"
+    TOOL_FAILURE = "tool_failure"
+    TIMEOUT = "timeout"
+    TOOL_BUDGET_EXCEEDED = "tool_budget_exceeded"
+    ADAPTER_FAILURE = "adapter_failure"
+    HARNESS_FAILURE = "harness_failure"
+
+
+class ScoreFailureReason(StrEnum):
+    SCHEMA_INVALID = "schema_invalid"
+    TASK_ID_MISMATCH = "task_id_mismatch"
+    TIMEOUT = "timeout"
+
+
 class WorkloadConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -89,7 +107,7 @@ class ScoreResult(BaseModel):
     precision_at_k: float = Field(ge=0.0, le=1.0)
     recall_at_k: float = Field(ge=0.0, le=1.0)
     ndcg_at_k: float = Field(ge=0.0, le=1.0)
-    failure_reason: str | None = None
+    failure_reason: ScoreFailureReason | None = None
 
 
 class UsageStats(BaseModel):
@@ -111,7 +129,7 @@ class TraceSummary(BaseModel):
 
     span_count: int = Field(default=0, ge=0)
     nested_tool_call_count: int = Field(default=0, ge=0)
-    failure_category: str | None = None
+    failure_category: FailureCategory | None = None
 
 
 class ToolCallRecord(BaseModel):
@@ -190,6 +208,9 @@ class ArmResult(BaseModel):
     task_id: str
     arm_name: str
     repetition: int = Field(ge=1)
+    trial_id: str | None = None
+    arm_order_index: int | None = Field(default=None, ge=0)
+    arm_order: tuple[str, ...] = Field(default_factory=tuple)
     latency_ms: float = Field(ge=0.0)
     timed_out: bool = False
     execution: ExecutionResult

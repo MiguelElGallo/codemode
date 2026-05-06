@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from codemode_probe.models import Candidate, RankedCandidate, StructuredAnswer, WorkloadConfig
+from codemode_probe.models import (
+    Candidate,
+    RankedCandidate,
+    ScoreFailureReason,
+    StructuredAnswer,
+    WorkloadConfig,
+)
 from codemode_probe.oracle import candidate_score, rank_candidates
 from codemode_probe.scoring import score_answer
 from codemode_probe.workload import candidates_by_shard, generate_candidates
@@ -104,7 +110,7 @@ def test_score_answer_rejects_invalid_schema() -> None:
     result = score_answer({"task_id": "task-1", "candidates": [{"id": "expected"}]}, oracle)
 
     assert result.schema_valid is False
-    assert result.failure_reason == "schema_invalid"
+    assert result.failure_reason == ScoreFailureReason.SCHEMA_INVALID
     assert result.top_k_overlap == 0.0
     assert result.ndcg_at_k == 0.0
 
@@ -128,7 +134,7 @@ def test_score_answer_rejects_task_id_mismatch() -> None:
     result = score_answer(actual, oracle)
 
     assert result.schema_valid is True
-    assert result.failure_reason == "task_id_mismatch"
+    assert result.failure_reason == ScoreFailureReason.TASK_ID_MISMATCH
     assert result.top_k_overlap == 0.0
     assert result.ndcg_at_k == 0.0
 

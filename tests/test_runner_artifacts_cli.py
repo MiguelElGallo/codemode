@@ -94,14 +94,46 @@ def test_artifact_creation_writing_and_summary_jsonl_stability(tmp_path: Path) -
     assert first_jsonl == second_jsonl
     result_rows = [json.loads(line) for line in first_jsonl.splitlines()]
     assert [row["repetition"] for row in result_rows] == [1, 2]
+    assert [row["trial_id"] for row in result_rows] == [None, None]
+    assert [row["arm_order_index"] for row in result_rows] == [None, None]
+    assert [row["arm_order"] for row in result_rows] == [[], []]
     assert {row["arm_name"] for row in result_rows} == {"deterministic_oracle_client"}
 
     manifest = json.loads((run_dir / "manifest.json").read_text())
-    assert set(manifest) == {"schema_version", "created_at", "task_count", "result_count"}
+    assert set(manifest) == {
+        "schema_version",
+        "created_at",
+        "task_count",
+        "result_count",
+        "environment",
+        "controls",
+    }
     assert manifest["schema_version"] == 1
     assert manifest["task_count"] == 1
     assert manifest["result_count"] == 2
     assert isinstance(manifest["created_at"], str)
+    assert manifest["controls"] == {
+        "repetitions": None,
+        "arm_order": "unspecified",
+        "random_seed": None,
+        "paired_baseline_arm": "direct_mcp_agent_parallel",
+        "cache_policy": "unspecified",
+        "concurrency_policy": "sequential",
+        "retry_policy": "none",
+        "timeout_policy": "per-task timeout_seconds",
+    }
+    assert isinstance(manifest["environment"]["python_version"], str)
+    assert isinstance(manifest["environment"]["python_executable"], str)
+    assert isinstance(manifest["environment"]["platform"], str)
+    assert set(manifest["environment"]["packages"]) == {
+        "codemode-probe",
+        "mcp",
+        "pydantic",
+        "pydantic-ai-harness",
+        "pydantic-monty",
+        "openai",
+        "anthropic",
+    }
 
     resolved_tasks = json.loads((run_dir / "tasks.resolved.json").read_text())
     assert [resolved_task["id"] for resolved_task in resolved_tasks] == [task.id]
@@ -133,10 +165,22 @@ def test_write_run_artifacts_manifest_includes_suite_config_when_provided(
         "repetitions": 3,
         "arm_order": "randomized",
         "random_seed": 42,
+        "paired_baseline_arm": "direct_mcp_agent_parallel",
         "normalized_arms": [
             "direct_mcp_agent_parallel",
             "in_process_tool_oracle",
         ],
+        "normalized_paired_baseline_arm": "direct_mcp_agent_parallel",
+    }
+    assert manifest["controls"] == {
+        "repetitions": 3,
+        "arm_order": "randomized",
+        "random_seed": 42,
+        "paired_baseline_arm": "direct_mcp_agent_parallel",
+        "cache_policy": "unspecified",
+        "concurrency_policy": "sequential",
+        "retry_policy": "none",
+        "timeout_policy": "per-task timeout_seconds",
     }
 
 
@@ -206,6 +250,15 @@ def test_cli_arms_selection_writes_one_result_row_per_arm(
     assert [row["arm_name"] for row in rows] == [
         "deterministic_oracle_client",
         "in_process_tool_oracle",
+    ]
+    assert [row["trial_id"] for row in rows] == [
+        "synthetic_fanout_smoke:rep-1",
+        "synthetic_fanout_smoke:rep-1",
+    ]
+    assert [row["arm_order_index"] for row in rows] == [0, 1]
+    assert [row["arm_order"] for row in rows] == [
+        ["deterministic_oracle_client", "in_process_tool_oracle"],
+        ["deterministic_oracle_client", "in_process_tool_oracle"],
     ]
     assert all(row["score"]["top_k_overlap"] == 1.0 for row in rows)
 
@@ -582,6 +635,7 @@ def test_cli_delegates_arm_order_and_random_seed_to_suite_config(
         captured["repetitions"] = config.repetitions
         captured["arm_order"] = config.arm_order
         captured["random_seed"] = config.random_seed
+        captured["paired_baseline_arm"] = config.paired_baseline_arm
         return []
 
     monkeypatch.setattr(
@@ -602,6 +656,8 @@ def test_cli_delegates_arm_order_and_random_seed_to_suite_config(
             "randomized",
             "--random-seed",
             "42",
+            "--paired-baseline-arm",
+            "direct_agent",
         ],
     )
     monkeypatch.setattr(
@@ -618,14 +674,17 @@ def test_cli_delegates_arm_order_and_random_seed_to_suite_config(
         "repetitions": 3,
         "arm_order": "randomized",
         "random_seed": 42,
+        "paired_baseline_arm": "direct_agent",
     }
     assert manifest["suite"] == {
         "arms": ["direct_agent", "in_process"],
         "repetitions": 3,
         "arm_order": "randomized",
         "random_seed": 42,
+        "paired_baseline_arm": "direct_agent",
         "normalized_arms": [
             "direct_mcp_agent_parallel",
             "in_process_tool_oracle",
         ],
+        "normalized_paired_baseline_arm": "direct_mcp_agent_parallel",
     }
