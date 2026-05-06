@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from statistics import median
 
-from codemode_probe.models import ArmResult
+from codemode_probe.models import ArmResult, ProbeTask
 
 
 def summarize_results(results: list[ArmResult]) -> dict[str, object]:
@@ -49,11 +49,84 @@ def render_summary_markdown(results: list[ArmResult]) -> str:
         [
             "",
             "Payload suppression is `1 - model_visible_bytes_total / tool_response_bytes_total`.",
+            "Pairwise deltas use `direct_mcp_agent_parallel` as the default baseline when present.",
             "Cold/warm cache cohorts are not separated in this run metadata yet.",
             "",
         ]
     )
     return "\n".join(lines)
+
+
+def summarize_paired_deltas(
+    results: list[ArmResult],
+    *,
+    baseline_arm: str,
+) -> list[dict[str, object]]:
+    by_key: dict[tuple[str, int], dict[str, ArmResult]] = {}
+    for result in results:
+        by_key.setdefault((result.task_id, result.repetition), {})[result.arm_name] = result
+
+    rows: list[dict[str, object]] = []
+    for task_id, repetition in sorted(by_key):
+        arm_results = by_key[(task_id, repetition)]
+        baseline = arm_results.get(baseline_arm)
+        if baseline is None:
+            continue
+        for arm_name in sorted(arm_results):
+            if arm_name == baseline_arm:
+                continue
+            comparison = arm_results[arm_name]
+            rows.append(_paired_delta_row(task_id, repetition, baseline, comparison))
+    return rows
+
+
+def summarize_workload_regimes(
+    tasks: list[ProbeTask],
+    results: list[ArmResult],
+) -> list[dict[str, object]]:
+    tasks_by_id = {task.id: task for task in tasks}
+    groups: dict[tuple[object, ...], list[ArmResult]] = {}
+    for result in results:
+        task = tasks_by_id.get(result.task_id)
+        if task is None:
+            continue
+        key = (
+            task.workload.task_family.value,
+            task.workload.tool_shape.value,
+            task.workload.candidate_count,
+            task.workload.payload_bytes,
+            task.workload.top_k,
+            result.arm_name,
+        )
+        groups.setdefault(key, []).append(result)
+
+    rows: list[dict[str, object]] = []
+    for key in sorted(groups):
+        task_family, tool_shape, candidate_count, payload_bytes, top_k, arm_name = key
+        arm_summary = _summarize_arm(groups[key])
+        rows.append(
+            {
+                "task_family": task_family,
+                "tool_shape": tool_shape,
+                "candidate_count": candidate_count,
+                "payload_bytes": payload_bytes,
+                "top_k": top_k,
+                "arm_name": arm_name,
+                "runs": arm_summary["runs"],
+                "success_rate": arm_summary["success_rate"],
+                "mean_ndcg_at_k": arm_summary["mean_ndcg_at_k"],
+                "mean_top_k_overlap": arm_summary["mean_top_k_overlap"],
+                "median_latency_ms": arm_summary["median_latency_ms"],
+                "p95_latency_ms": arm_summary["p95_latency_ms"],
+                "mean_tool_calls": arm_summary["mean_tool_calls"],
+                "mean_model_requests": arm_summary["mean_model_requests"],
+                "tool_response_bytes_total": arm_summary["tool_response_bytes_total"],
+                "model_visible_bytes_total": arm_summary["model_visible_bytes_total"],
+                "visible_fraction": arm_summary["visible_fraction"],
+                "payload_suppression_ratio": arm_summary["payload_suppression_ratio"],
+            }
+        )
+    return rows
 
 
 def _summarize_arm(results: list[ArmResult]) -> dict[str, object]:
@@ -126,6 +199,45 @@ def _summarize_arm(results: list[ArmResult]) -> dict[str, object]:
     }
 
 
+def _paired_delta_row(
+    task_id: str,
+    repetition: int,
+    baseline: ArmResult,
+    comparison: ArmResult,
+) -> dict[str, object]:
+    baseline_visible_fraction = _visible_fraction(baseline)
+    comparison_visible_fraction = _visible_fraction(comparison)
+    return {
+        "task_id": task_id,
+        "repetition": repetition,
+        "baseline_arm": baseline.arm_name,
+        "comparison_arm": comparison.arm_name,
+        "delta_ndcg_at_k": round(comparison.score.ndcg_at_k - baseline.score.ndcg_at_k, 6),
+        "delta_top_k_overlap": round(
+            comparison.score.top_k_overlap - baseline.score.top_k_overlap, 6
+        ),
+        "delta_latency_ms": round(comparison.latency_ms - baseline.latency_ms, 3),
+        "latency_ratio": _safe_ratio(comparison.latency_ms, baseline.latency_ms),
+        "delta_tool_calls": (
+            comparison.execution.usage.tool_calls - baseline.execution.usage.tool_calls
+        ),
+        "delta_model_requests": (
+            comparison.execution.usage.model_requests
+            - baseline.execution.usage.model_requests
+        ),
+        "delta_tool_response_bytes": (
+            comparison.execution.usage.tool_response_bytes_total
+            - baseline.execution.usage.tool_response_bytes_total
+        ),
+        "delta_model_visible_bytes": (
+            (comparison.execution.usage.model_visible_bytes_total or 0)
+            - (baseline.execution.usage.model_visible_bytes_total or 0)
+        ),
+        "payload_visible_ratio_baseline": baseline_visible_fraction,
+        "payload_visible_ratio_comparison": comparison_visible_fraction,
+    }
+
+
 def _mean(values: list[float]) -> float:
     if not values:
         return 0.0
@@ -136,6 +248,19 @@ def _ratio(numerator: int, denominator: int) -> float:
     if denominator == 0:
         return 0.0
     return round(numerator / denominator, 6)
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float | None:
+    if denominator == 0:
+        return None
+    return round(numerator / denominator, 6)
+
+
+def _visible_fraction(result: ArmResult) -> float | None:
+    tool_bytes = result.execution.usage.tool_response_bytes_total
+    if tool_bytes == 0:
+        return None
+    return round((result.execution.usage.model_visible_bytes_total or 0) / tool_bytes, 6)
 
 
 def _percentile(values: list[float], percentile: float) -> float:

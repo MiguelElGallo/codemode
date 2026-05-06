@@ -4,14 +4,28 @@ import json
 from pathlib import Path
 
 from codemode_probe.artifacts import write_run_artifacts
-from codemode_probe.models import ArmResult, ExecutionResult, ScoreResult, UsageStats
-from codemode_probe.reporting import render_summary_markdown, summarize_results
+from codemode_probe.models import (
+    ArmResult,
+    ExecutionResult,
+    ScoreResult,
+    TaskFamily,
+    ToolShape,
+    UsageStats,
+)
+from codemode_probe.reporting import (
+    render_summary_markdown,
+    summarize_paired_deltas,
+    summarize_results,
+    summarize_workload_regimes,
+)
 from codemode_probe.workload import make_probe_task
 
 
 def _result(
     arm_name: str,
     *,
+    task_id: str = "task-1",
+    repetition: int = 1,
     latency_ms: float = 100.0,
     schema_valid: bool = True,
     timed_out: bool = False,
@@ -24,9 +38,9 @@ def _result(
     usage: UsageStats | None = None,
 ) -> ArmResult:
     return ArmResult(
-        task_id="task-1",
+        task_id=task_id,
         arm_name=arm_name,
-        repetition=1,
+        repetition=repetition,
         latency_ms=latency_ms,
         timed_out=timed_out,
         execution=ExecutionResult(usage=usage or UsageStats(), error=error),
@@ -184,6 +198,200 @@ def test_summarize_results_median_and_p95_metrics() -> None:
     assert arm["median_ndcg_at_k"] == 0.5
 
 
+def test_summarize_paired_deltas_matches_task_and_repetition_and_orders_rows() -> None:
+    results = [
+        _result("candidate-b", task_id="task-b", repetition=2),
+        _result("baseline", task_id="task-b", repetition=2),
+        _result("candidate-b", task_id="task-a", repetition=2),
+        _result("candidate-a", task_id="task-a", repetition=1),
+        _result("candidate-b", task_id="task-a", repetition=1),
+        _result("baseline", task_id="task-a", repetition=1),
+        _result("candidate-a", task_id="task-c", repetition=1),
+        _result("baseline", task_id="task-a", repetition=2),
+    ]
+
+    rows = summarize_paired_deltas(results, baseline_arm="baseline")
+
+    assert [
+        (row["task_id"], row["repetition"], row["comparison_arm"]) for row in rows
+    ] == [
+        ("task-a", 1, "candidate-a"),
+        ("task-a", 1, "candidate-b"),
+        ("task-a", 2, "candidate-b"),
+        ("task-b", 2, "candidate-b"),
+    ]
+
+
+def test_summarize_paired_deltas_calculates_deltas_and_payload_visible_ratios() -> None:
+    rows = summarize_paired_deltas(
+        [
+            _result(
+                "baseline",
+                latency_ms=100.0,
+                top_k_overlap=0.25,
+                ndcg_at_k=0.4,
+                usage=UsageStats(
+                    model_requests=2,
+                    tool_calls=4,
+                    tool_response_bytes_total=200,
+                    model_visible_bytes_total=50,
+                ),
+            ),
+            _result(
+                "comparison",
+                latency_ms=150.0,
+                top_k_overlap=0.75,
+                ndcg_at_k=0.9,
+                usage=UsageStats(
+                    model_requests=5,
+                    tool_calls=7,
+                    tool_response_bytes_total=80,
+                    model_visible_bytes_total=60,
+                ),
+            ),
+        ],
+        baseline_arm="baseline",
+    )
+
+    assert rows == [
+        {
+            "task_id": "task-1",
+            "repetition": 1,
+            "baseline_arm": "baseline",
+            "comparison_arm": "comparison",
+            "delta_ndcg_at_k": 0.5,
+            "delta_top_k_overlap": 0.5,
+            "delta_latency_ms": 50.0,
+            "latency_ratio": 1.5,
+            "delta_tool_calls": 3,
+            "delta_model_requests": 3,
+            "delta_tool_response_bytes": -120,
+            "delta_model_visible_bytes": 10,
+            "payload_visible_ratio_baseline": 0.25,
+            "payload_visible_ratio_comparison": 0.75,
+        }
+    ]
+
+
+def test_summarize_paired_deltas_returns_none_latency_ratio_for_zero_baseline() -> None:
+    rows = summarize_paired_deltas(
+        [
+            _result("baseline", latency_ms=0.0),
+            _result("comparison", latency_ms=25.0),
+        ],
+        baseline_arm="baseline",
+    )
+
+    assert rows[0]["latency_ratio"] is None
+
+
+def test_summarize_workload_regimes_groups_by_workload_and_arm_and_skips_unknown_tasks() -> None:
+    tasks = [
+        make_probe_task(
+            "scalar-small",
+            task_family=TaskFamily.SCALAR_LARGE_FANOUT,
+            tool_shape=ToolShape.SCALAR,
+            shard_count=2,
+            candidates_per_shard=3,
+            payload_bytes=128,
+            top_k=2,
+        ),
+        make_probe_task(
+            "batch-large",
+            task_family=TaskFamily.BATCH_LARGE_FANOUT,
+            tool_shape=ToolShape.BATCH,
+            shard_count=4,
+            candidates_per_shard=5,
+            payload_bytes=512,
+            top_k=4,
+        ),
+    ]
+    results = [
+        _result(
+            "arm-a",
+            task_id="scalar-small",
+            latency_ms=10.0,
+            top_k_overlap=0.2,
+            ndcg_at_k=0.4,
+            usage=UsageStats(
+                model_requests=1,
+                tool_calls=2,
+                tool_response_bytes_total=100,
+                model_visible_bytes_total=25,
+            ),
+        ),
+        _result(
+            "arm-a",
+            task_id="scalar-small",
+            repetition=2,
+            latency_ms=30.0,
+            top_k_overlap=0.8,
+            ndcg_at_k=0.6,
+            usage=UsageStats(
+                model_requests=3,
+                tool_calls=4,
+                tool_response_bytes_total=300,
+                model_visible_bytes_total=75,
+            ),
+        ),
+        _result(
+            "arm-b",
+            task_id="scalar-small",
+            latency_ms=20.0,
+            top_k_overlap=1.0,
+            ndcg_at_k=1.0,
+            usage=UsageStats(
+                model_requests=2,
+                tool_calls=6,
+                tool_response_bytes_total=0,
+                model_visible_bytes_total=None,
+            ),
+        ),
+        _result("arm-a", task_id="batch-large", latency_ms=40.0),
+        _result("arm-a", task_id="unknown-task", latency_ms=999.0),
+    ]
+
+    rows = summarize_workload_regimes(tasks, results)
+
+    assert [
+        (
+            row["task_family"],
+            row["tool_shape"],
+            row["candidate_count"],
+            row["payload_bytes"],
+            row["top_k"],
+            row["arm_name"],
+        )
+        for row in rows
+    ] == [
+        ("batch_large_fanout", "batch", 20, 512, 4, "arm-a"),
+        ("scalar_large_fanout", "scalar", 6, 128, 2, "arm-a"),
+        ("scalar_large_fanout", "scalar", 6, 128, 2, "arm-b"),
+    ]
+    assert rows[1] == {
+        "task_family": "scalar_large_fanout",
+        "tool_shape": "scalar",
+        "candidate_count": 6,
+        "payload_bytes": 128,
+        "top_k": 2,
+        "arm_name": "arm-a",
+        "runs": 2,
+        "success_rate": 1.0,
+        "mean_ndcg_at_k": 0.5,
+        "mean_top_k_overlap": 0.5,
+        "median_latency_ms": 20.0,
+        "p95_latency_ms": 10.0,
+        "mean_tool_calls": 3.0,
+        "mean_model_requests": 2.0,
+        "tool_response_bytes_total": 400,
+        "model_visible_bytes_total": 100,
+        "visible_fraction": 0.25,
+        "payload_suppression_ratio": 0.75,
+    }
+    assert rows[2]["visible_fraction"] is None
+    assert rows[2]["payload_suppression_ratio"] is None
+
+
 def test_render_summary_markdown_is_deterministic_and_includes_caveats() -> None:
     results = [
         _result(
@@ -217,6 +425,7 @@ def test_render_summary_markdown_is_deterministic_and_includes_caveats() -> None
             "| arm-a | 1 | 1.000 | 1.000 | 1.000 | 50.000 | 1 | 1 | n/a | n/a | 0 |",
             "",
             "Payload suppression is `1 - model_visible_bytes_total / tool_response_bytes_total`.",
+            "Pairwise deltas use `direct_mcp_agent_parallel` as the default baseline when present.",
             "Cold/warm cache cohorts are not separated in this run metadata yet.",
             "",
         ]
@@ -259,3 +468,172 @@ def test_write_run_artifacts_writes_report_without_replacing_summary_or_results(
         for line in (tmp_path / "results.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert [row["arm_name"] for row in jsonl_rows] == ["arm-a"]
+
+
+def test_write_run_artifacts_writes_paired_deltas_with_direct_mcp_parallel_baseline(
+    tmp_path: Path,
+) -> None:
+    task = make_probe_task(
+        "task-1",
+        seed=1,
+        shard_count=1,
+        candidates_per_shard=2,
+        payload_bytes=4,
+        top_k=1,
+    )
+    results = [
+        _result(
+            "direct_mcp_agent_parallel",
+            latency_ms=100.0,
+            top_k_overlap=0.25,
+            ndcg_at_k=0.4,
+        ),
+        _result(
+            "optimized_agent",
+            latency_ms=125.0,
+            top_k_overlap=0.75,
+            ndcg_at_k=0.9,
+        ),
+        _result(
+            "unpaired_agent",
+            task_id="task-2",
+            latency_ms=999.0,
+            top_k_overlap=1.0,
+            ndcg_at_k=1.0,
+        ),
+    ]
+
+    write_run_artifacts(tmp_path, [task], results)
+
+    paired_deltas = json.loads(
+        (tmp_path / "paired_deltas.json").read_text(encoding="utf-8")
+    )
+    assert paired_deltas == [
+        {
+            "task_id": "task-1",
+            "repetition": 1,
+            "baseline_arm": "direct_mcp_agent_parallel",
+            "comparison_arm": "optimized_agent",
+            "delta_ndcg_at_k": 0.5,
+            "delta_top_k_overlap": 0.5,
+            "delta_latency_ms": 25.0,
+            "latency_ratio": 1.25,
+            "delta_tool_calls": 0,
+            "delta_model_requests": 0,
+            "delta_tool_response_bytes": 0,
+            "delta_model_visible_bytes": 0,
+            "payload_visible_ratio_baseline": None,
+            "payload_visible_ratio_comparison": None,
+        }
+    ]
+
+
+def test_write_run_artifacts_writes_empty_paired_deltas_when_baseline_missing(
+    tmp_path: Path,
+) -> None:
+    task = make_probe_task(
+        "task-1",
+        seed=1,
+        shard_count=1,
+        candidates_per_shard=2,
+        payload_bytes=4,
+        top_k=1,
+    )
+    results = [
+        _result("optimized_agent", latency_ms=125.0),
+        _result("direct_mcp_agent_sequential", latency_ms=150.0),
+    ]
+
+    write_run_artifacts(tmp_path, [task], results)
+
+    assert json.loads((tmp_path / "paired_deltas.json").read_text(encoding="utf-8")) == []
+
+
+def test_write_run_artifacts_writes_workload_regimes_joined_by_task(
+    tmp_path: Path,
+) -> None:
+    scalar_task = make_probe_task(
+        "scalar-small",
+        task_family=TaskFamily.SCALAR_LARGE_FANOUT,
+        tool_shape=ToolShape.SCALAR,
+        shard_count=2,
+        candidates_per_shard=3,
+        payload_bytes=128,
+        top_k=2,
+    )
+    batch_task = make_probe_task(
+        "batch-large",
+        task_family=TaskFamily.BATCH_LARGE_FANOUT,
+        tool_shape=ToolShape.BATCH,
+        shard_count=4,
+        candidates_per_shard=5,
+        payload_bytes=512,
+        top_k=4,
+    )
+    results = [
+        _result("arm-a", task_id="scalar-small", latency_ms=10.0),
+        _result("arm-b", task_id="scalar-small", latency_ms=20.0),
+        _result("arm-a", task_id="batch-large", latency_ms=30.0),
+        _result("arm-a", task_id="unknown-task", latency_ms=999.0),
+    ]
+
+    write_run_artifacts(tmp_path, [scalar_task, batch_task], results)
+
+    workload_regimes = json.loads(
+        (tmp_path / "workload_regimes.json").read_text(encoding="utf-8")
+    )
+    assert [
+        (
+            row["task_family"],
+            row["tool_shape"],
+            row["candidate_count"],
+            row["payload_bytes"],
+            row["top_k"],
+            row["arm_name"],
+            row["runs"],
+        )
+        for row in workload_regimes
+    ] == [
+        ("batch_large_fanout", "batch", 20, 512, 4, "arm-a", 1),
+        ("scalar_large_fanout", "scalar", 6, 128, 2, "arm-a", 1),
+        ("scalar_large_fanout", "scalar", 6, 128, 2, "arm-b", 1),
+    ]
+
+
+def test_write_run_artifacts_keeps_existing_summary_results_and_report_artifacts(
+    tmp_path: Path,
+) -> None:
+    task = make_probe_task(
+        "task-1",
+        seed=1,
+        shard_count=1,
+        candidates_per_shard=2,
+        payload_bytes=4,
+        top_k=1,
+    )
+    results = [
+        _result(
+            "direct_mcp_agent_parallel",
+            latency_ms=100.0,
+            usage=UsageStats(
+                model_requests=1,
+                tool_calls=2,
+                tool_response_bytes_total=80,
+                model_visible_bytes_total=20,
+            ),
+        )
+    ]
+
+    write_run_artifacts(tmp_path, [task], results)
+
+    assert json.loads((tmp_path / "summary.json").read_text(encoding="utf-8")) == summarize_results(
+        results
+    )
+    jsonl_rows = [
+        json.loads(line)
+        for line in (tmp_path / "results.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert jsonl_rows == [results[0].model_dump(mode="json")]
+    assert "Pairwise deltas use `direct_mcp_agent_parallel` as the default baseline when present." in (
+        tmp_path / "report.md"
+    ).read_text(encoding="utf-8")

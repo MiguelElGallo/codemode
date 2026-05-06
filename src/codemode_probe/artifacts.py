@@ -8,7 +8,12 @@ from pydantic import BaseModel
 
 from codemode_probe.models import ArmResult, ProbeTask
 from codemode_probe.prompts import render_prompt
-from codemode_probe.reporting import render_summary_markdown, summarize_results
+from codemode_probe.reporting import (
+    render_summary_markdown,
+    summarize_paired_deltas,
+    summarize_results,
+    summarize_workload_regimes,
+)
 from codemode_probe.suite import BenchmarkSuiteConfig
 
 SCHEMA_VERSION = 1
@@ -48,6 +53,11 @@ def write_run_artifacts(
     )
     _write_jsonl(run_dir / "results.jsonl", results)
     _write_json(run_dir / "summary.json", summarize_results(results))
+    _write_json(
+        run_dir / "paired_deltas.json",
+        summarize_paired_deltas(results, baseline_arm="direct_mcp_agent_parallel"),
+    )
+    _write_json(run_dir / "workload_regimes.json", summarize_workload_regimes(tasks, results))
     (run_dir / "report.md").write_text(render_summary_markdown(results), encoding="utf-8")
 
 
