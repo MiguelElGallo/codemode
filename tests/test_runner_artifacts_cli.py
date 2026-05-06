@@ -22,6 +22,7 @@ from codemode_probe.models import (
     UsageStats,
 )
 from codemode_probe.prompts import render_prompt
+from codemode_probe.provider_config import anthropic_config
 from codemode_probe.provenance import hash_candidate_set, hash_oracle_answer
 from codemode_probe.oracle import rank_candidates
 from codemode_probe.runner import BenchmarkRunner
@@ -259,12 +260,14 @@ def test_artifact_creation_writing_and_summary_jsonl_stability(tmp_path: Path) -
         "tasks.resolved.json",
         "prompts.resolved.json",
         "results.jsonl",
+        "transcripts.jsonl",
         "summary.json",
         "paired_deltas.json",
         "pairing_coverage.json",
         "paired_delta_summary.json",
         "paired_uncertainty.json",
         "cache_cohorts.json",
+        "failure_modes.json",
         "workload_regimes.json",
         "preflight.json",
         "report.md",
@@ -330,6 +333,33 @@ def test_write_run_artifacts_manifest_includes_suite_config_when_provided(
         "concurrency_policy": "sequential",
         "retry_policy": "none",
         "timeout_policy": "per-task timeout_seconds",
+    }
+
+
+def test_write_run_artifacts_manifest_includes_provider_config_when_provided(
+    tmp_path: Path,
+) -> None:
+    task = tiny_task()
+    results = BenchmarkRunner(DeterministicOracleExecutor()).run([task])
+    provider_config = anthropic_config(
+        model="claude-test",
+        enabled=False,
+        api_key_env_var="ANTHROPIC_TEST_KEY",
+        timeout_seconds=12.5,
+        temperature=0.2,
+    )
+
+    run_dir = create_run_dir(tmp_path, run_id="provider-manifest")
+    write_run_artifacts(run_dir, [task], results, provider_config=provider_config)
+
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["provider"] == {
+        "provider": "anthropic",
+        "model": "claude-test",
+        "enabled": False,
+        "api_key_env_var": "ANTHROPIC_TEST_KEY",
+        "timeout_seconds": 12.5,
+        "temperature": 0.2,
     }
 
 
@@ -448,6 +478,73 @@ def test_cli_preflight_failure_raises_before_writing_artifacts(
         main()
 
     assert not (tmp_path / "failed-preflight").exists()
+
+
+def test_cli_provider_dry_run_records_config_without_sdk_or_env_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OPENAI_TEST_KEY", raising=False)
+
+    def fail_find_spec(package: str) -> None:
+        raise AssertionError(f"dry-run should not inspect SDK package {package}")
+
+    monkeypatch.setattr("importlib.util.find_spec", fail_find_spec)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "provider-dry-run",
+            "--skip-preflight",
+            "--provider",
+            "openai",
+            "--provider-model",
+            "gpt-test",
+            "--provider-api-key-env-var",
+            "OPENAI_TEST_KEY",
+            "--provider-timeout-seconds",
+            "9.5",
+            "--provider-temperature",
+            "0.1",
+            "--provider-dry-run",
+        ],
+    )
+
+    main()
+
+    manifest = json.loads((tmp_path / "provider-dry-run" / "manifest.json").read_text())
+    assert manifest["provider"] == {
+        "provider": "openai",
+        "model": "gpt-test",
+        "enabled": False,
+        "api_key_env_var": "OPENAI_TEST_KEY",
+        "timeout_seconds": 9.5,
+        "temperature": 0.1,
+    }
+
+
+def test_cli_provider_without_dry_run_requires_explicit_live_enable_before_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "provider-disabled",
+            "--provider",
+            "anthropic",
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="live provider 'anthropic' is disabled"):
+        main()
+
+    assert not (tmp_path / "provider-disabled").exists()
 
 
 def test_cli_arms_selection_writes_one_result_row_per_arm(

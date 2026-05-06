@@ -80,7 +80,15 @@ def _ndcg(actual_ids: list[str], expected_ids: list[str]) -> float:
     relevance_by_id = {
         candidate_id: len(expected_ids) - index for index, candidate_id in enumerate(expected_ids)
     }
-    dcg = _dcg([relevance_by_id.get(candidate_id, 0) for candidate_id in actual_ids])
+    seen_actual_ids: set[str] = set()
+    relevances = []
+    for candidate_id in actual_ids:
+        if candidate_id in seen_actual_ids:
+            relevances.append(0)
+            continue
+        seen_actual_ids.add(candidate_id)
+        relevances.append(relevance_by_id.get(candidate_id, 0))
+    dcg = _dcg(relevances)
     ideal_dcg = _dcg(sorted(relevance_by_id.values(), reverse=True))
     if ideal_dcg == 0:
         return 0.0

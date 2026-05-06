@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from codemode_probe.models import (
     Candidate,
+    ExecutionContext,
     ModelTurnRequest,
     ModelTurnResult,
     NormalizedModelUsage,
@@ -23,6 +24,7 @@ class ProviderTurnRequest(BaseModel):
     rendered_prompt: RenderedPrompt
     turn_index: int = Field(ge=1)
     tool_results: list[NormalizedToolResult] = Field(default_factory=list)
+    context: ExecutionContext = Field(default_factory=ExecutionContext)
 
 
 class ProviderTurnResponse(BaseModel):
@@ -52,6 +54,7 @@ class ProviderBackedModelClient:
             rendered_prompt=render_prompt(request.task),
             turn_index=request.turn_index,
             tool_results=request.tool_results,
+            context=request.context,
         )
         provider_response = await self._provider_client.run_provider_turn(provider_request)
         return ModelTurnResult(

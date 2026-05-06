@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from codemode_probe.executor_factory import available_executor_ids, build_executor, normalize_executor_id
-from codemode_probe.models import ArmResult, CachePolicy, CacheState, ProbeTask
+from codemode_probe.models import ArmResult, CachePolicy, CacheState, ExecutionContext, ProbeTask
 from codemode_probe.runner import BenchmarkRunner
 
 ArmOrder = Literal["fixed", "randomized"]
@@ -60,9 +60,19 @@ def run_benchmark_suite(
             trial_id = f"{task.id}:rep-{repetition}"
             arm_order = tuple(arms)
             cache_state = _cache_state_for_repetition(repetition, config)
+            context = ExecutionContext(
+                cache_policy=config.cache_policy,
+                cache_state=cache_state,
+                cache_namespace=config.cache_namespace,
+                cache_warmup_run=cache_state == CacheState.WARMUP,
+            )
             for arm_order_index, arm in enumerate(arms):
                 executor = build_executor(arm, task)
-                result = BenchmarkRunner(executor).run_task(task, repetition=repetition)
+                result = BenchmarkRunner(executor).run_task(
+                    task,
+                    repetition=repetition,
+                    context=context,
+                )
                 results.append(
                     result.model_copy(
                         update={

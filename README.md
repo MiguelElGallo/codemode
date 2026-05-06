@@ -85,27 +85,36 @@ manifest.json
 tasks.resolved.json
 prompts.resolved.json
 results.jsonl
+transcripts.jsonl
 summary.json
 paired_deltas.json
 pairing_coverage.json
 paired_delta_summary.json
 paired_uncertainty.json
 cache_cohorts.json
+failure_modes.json
 preflight.json
 workload_regimes.json
 report.md
 ```
 
-`results.jsonl` is the canonical machine-readable record. `summary.json`,
-`paired_deltas.json`, `pairing_coverage.json`, `paired_delta_summary.json`,
-`paired_uncertainty.json`, `cache_cohorts.json`, `preflight.json`, and
-`workload_regimes.json` are derived from it. `report.md` is presentation-only.
+`results.jsonl` is the canonical machine-readable record. `transcripts.jsonl`
+is a normalized, redacted transcript view for inspecting model turns and tool
+activity. `summary.json`, `paired_deltas.json`, `pairing_coverage.json`,
+`paired_delta_summary.json`, `paired_uncertainty.json`, `cache_cohorts.json`,
+`failure_modes.json`, `preflight.json`, and `workload_regimes.json` are derived
+from the run results. `report.md` is presentation-only.
 
 `manifest.json` records the normalized arms, selected paired-delta baseline,
 arm-order seed, retry/concurrency/cache policy labels, Python/platform metadata,
 git source metadata, benchmark protocol version/module hashes, optional
 integration package versions when installed, and SHA-256 checksums for the
 emitted artifact files.
+
+Optional provider settings can be recorded without credentials by passing
+`--provider`, `--provider-model`, and `--provider-dry-run`. Without
+`--provider-dry-run`, provider configs require `--enable-live` and pass SDK plus
+API-key environment checks before any run artifacts are created.
 
 ## Interpreting Results
 

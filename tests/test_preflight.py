@@ -23,6 +23,12 @@ def test_run_preflight_checks_covers_oracle_parity_and_code_mode_controls() -> N
         "scripted_agent_parity_batch",
         "code_mode_scripted_parity_scalar",
         "code_mode_scripted_parity_batch",
+        "calibration_schema_invalid",
+        "calibration_task_id_mismatch",
+        "calibration_partial_overlap",
+        "calibration_hallucinated_ids",
+        "calibration_duplicate_ids",
+        "calibration_degraded_ranking",
     ]
     assert all(result.passed for result in results)
     assert all(result.details for result in results)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
+from codemode_probe.calibration import run_scoring_calibration_checks
 from codemode_probe.models import ToolShape
 from codemode_probe.runner import BenchmarkRunner
 from codemode_probe.executor_factory import build_executor
@@ -23,6 +24,7 @@ def run_preflight_checks() -> list[PreflightCheckResult]:
         *_direct_mcp_tool_oracle_parity_checks(),
         *_scripted_agent_parity_checks(),
         *_code_mode_scripted_parity_checks(),
+        *_scoring_calibration_checks(),
     ]
 
 
@@ -101,6 +103,13 @@ def _code_mode_scripted_parity_checks() -> list[PreflightCheckResult]:
             tool_shape=tool_shape,
         )
         for tool_shape in (ToolShape.SCALAR, ToolShape.BATCH)
+    ]
+
+
+def _scoring_calibration_checks() -> list[PreflightCheckResult]:
+    return [
+        PreflightCheckResult.model_validate(result.model_dump(mode="json"))
+        for result in run_scoring_calibration_checks()
     ]
 
 

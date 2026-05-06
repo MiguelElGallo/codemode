@@ -8,6 +8,7 @@ from codemode_probe.cases import CaseMatrixConfig, generate_case_tasks
 from codemode_probe.executor_factory import available_executor_ids
 from codemode_probe.models import CachePolicy, ProbeTask, TaskFamily, ToolShape
 from codemode_probe.preflight import run_preflight_checks
+from codemode_probe.provider_config import LiveProvider, LiveProviderConfig
 from codemode_probe.suite import BenchmarkSuiteConfig, run_benchmark_suite
 from codemode_probe.workload import make_probe_task
 
@@ -68,7 +69,49 @@ def main() -> None:
         action="store_true",
         help="Skip local synthetic preflight checks before running the benchmark.",
     )
+    parser.add_argument(
+        "--provider",
+        choices=[item.value for item in LiveProvider],
+        default=None,
+        help="Optional live provider config to validate or record.",
+    )
+    parser.add_argument(
+        "--provider-model",
+        default=None,
+        help="Model name for the optional live provider config.",
+    )
+    parser.add_argument(
+        "--provider-api-key-env-var",
+        default=None,
+        help="Environment variable name that will hold the provider API key.",
+    )
+    parser.add_argument(
+        "--provider-timeout-seconds",
+        type=float,
+        default=60.0,
+        help="Timeout recorded for the optional live provider config.",
+    )
+    parser.add_argument(
+        "--provider-temperature",
+        type=float,
+        default=0.0,
+        help="Temperature recorded for the optional live provider config.",
+    )
+    parser.add_argument(
+        "--provider-dry-run",
+        action="store_true",
+        help="Record provider config without importing SDKs or checking credentials.",
+    )
+    parser.add_argument(
+        "--enable-live",
+        action="store_true",
+        help="Allow live provider validation.",
+    )
     args = parser.parse_args()
+
+    provider_config = _provider_config_from_args(args)
+    if provider_config is not None and not args.provider_dry_run:
+        provider_config.validate_for_live_use()
 
     preflight_results = None if args.skip_preflight else run_preflight_checks()
     if preflight_results is not None and not all(result.passed for result in preflight_results):
@@ -96,6 +139,7 @@ def main() -> None:
         results,
         suite_config=suite_config,
         preflight_results=preflight_results,
+        provider_config=provider_config,
     )
     print(run_dir)
 
@@ -130,6 +174,28 @@ def _task_from_args(args: argparse.Namespace) -> ProbeTask:
             "max_tool_calls": args.max_tool_calls,
             "timeout_seconds": args.timeout_seconds,
         }
+    )
+
+
+def _provider_config_from_args(args: argparse.Namespace) -> LiveProviderConfig | None:
+    if args.provider is None:
+        return None
+    provider = LiveProvider(args.provider)
+    if provider == LiveProvider.OPENAI:
+        default_model = "gpt-4.1-mini"
+        default_env_var = "OPENAI_API_KEY"
+    elif provider == LiveProvider.ANTHROPIC:
+        default_model = "claude-sonnet-4-5"
+        default_env_var = "ANTHROPIC_API_KEY"
+    else:
+        raise ValueError(f"unsupported provider: {provider}")
+    return LiveProviderConfig(
+        provider=provider,
+        model=args.provider_model or default_model,
+        enabled=args.enable_live,
+        api_key_env_var=args.provider_api_key_env_var or default_env_var,
+        timeout_seconds=args.provider_timeout_seconds,
+        temperature=args.provider_temperature,
     )
 
 

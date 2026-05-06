@@ -9,14 +9,17 @@ from codemode_probe.models import (
     CachePolicy,
     CacheState,
     ExecutionResult,
+    FailureCategory,
     ScoreResult,
     TaskFamily,
     ToolShape,
+    TraceSummary,
     UsageStats,
 )
 from codemode_probe.reporting import (
     render_summary_markdown,
     summarize_cache_cohorts,
+    summarize_failure_modes,
     summarize_pairing_coverage,
     summarize_paired_delta_groups,
     summarize_paired_deltas,
@@ -49,7 +52,9 @@ def _result(
     recall_at_k: float = 0.75,
     ndcg_at_k: float = 0.5,
     error: str | None = None,
+    failure_category: FailureCategory | None = None,
     usage: UsageStats | None = None,
+    raw: dict[str, object] | None = None,
 ) -> ArmResult:
     return ArmResult(
         task_id=task_id,
@@ -64,7 +69,12 @@ def _result(
         cache_warmup_run=cache_warmup_run,
         latency_ms=latency_ms,
         timed_out=timed_out,
-        execution=ExecutionResult(usage=usage or UsageStats(), error=error),
+        execution=ExecutionResult(
+            usage=usage or UsageStats(),
+            trace=TraceSummary(failure_category=failure_category),
+            raw=raw or {},
+            error=error,
+        ),
         score=ScoreResult(
             schema_valid=schema_valid,
             timed_out=timed_out,
@@ -719,6 +729,78 @@ def test_summarize_cache_cohorts_groups_by_arm_policy_state_and_namespace() -> N
     assert rows[1]["visible_fraction"] == 0.1
 
 
+def test_summarize_failure_modes_groups_non_successes_by_failure_contract() -> None:
+    rows = summarize_failure_modes(
+        [
+            _result("arm-a", task_id="success"),
+            _result(
+                "arm-a",
+                task_id="schema-a",
+                trial_id="schema-a:rep-1",
+                schema_valid=False,
+                failure_reason="schema_invalid",
+            ),
+            _result(
+                "arm-a",
+                task_id="schema-b",
+                trial_id="schema-b:rep-1",
+                schema_valid=False,
+                failure_reason="schema_invalid",
+            ),
+            _result(
+                "arm-b",
+                task_id="budget",
+                error="max_tool_calls_exceeded",
+                failure_category=FailureCategory.TOOL_BUDGET_EXCEEDED,
+            ),
+            _result(
+                "arm-b",
+                task_id="timeout",
+                timed_out=True,
+                error="timeout",
+                failure_category=FailureCategory.TIMEOUT,
+                failure_reason="timeout",
+            ),
+        ]
+    )
+
+    assert rows == [
+        {
+            "arm_name": "arm-a",
+            "failure_category": None,
+            "execution_error": None,
+            "score_failure_reason": "schema_invalid",
+            "timed_out": False,
+            "schema_valid": False,
+            "runs": 2,
+            "task_ids": ["schema-a", "schema-b"],
+            "trial_ids": ["schema-a:rep-1", "schema-b:rep-1"],
+        },
+        {
+            "arm_name": "arm-b",
+            "failure_category": "timeout",
+            "execution_error": "timeout",
+            "score_failure_reason": "timeout",
+            "timed_out": True,
+            "schema_valid": True,
+            "runs": 1,
+            "task_ids": ["timeout"],
+            "trial_ids": [],
+        },
+        {
+            "arm_name": "arm-b",
+            "failure_category": "tool_budget_exceeded",
+            "execution_error": "max_tool_calls_exceeded",
+            "score_failure_reason": None,
+            "timed_out": False,
+            "schema_valid": True,
+            "runs": 1,
+            "task_ids": ["budget"],
+            "trial_ids": [],
+        },
+    ]
+
+
 def test_render_summary_markdown_is_deterministic_and_includes_caveats() -> None:
     results = [
         _result(
@@ -1024,6 +1106,92 @@ def test_write_run_artifacts_writes_workload_regimes_joined_by_task(
         ("scalar_large_fanout", "scalar", 6, 128, 2, "arm-a", 1),
         ("scalar_large_fanout", "scalar", 6, 128, 2, "arm-b", 1),
     ]
+
+
+def test_write_run_artifacts_writes_failure_modes(
+    tmp_path: Path,
+) -> None:
+    task = make_probe_task(
+        "task-1",
+        seed=1,
+        shard_count=1,
+        candidates_per_shard=2,
+        payload_bytes=4,
+        top_k=1,
+    )
+    results = [
+        _result(
+            "direct_mcp_agent_parallel",
+            task_id="task-1",
+            error="max_tool_calls_exceeded",
+            failure_category=FailureCategory.TOOL_BUDGET_EXCEEDED,
+        )
+    ]
+
+    write_run_artifacts(tmp_path, [task], results)
+
+    assert json.loads((tmp_path / "failure_modes.json").read_text(encoding="utf-8")) == [
+        {
+            "arm_name": "direct_mcp_agent_parallel",
+            "failure_category": "tool_budget_exceeded",
+            "execution_error": "max_tool_calls_exceeded",
+            "score_failure_reason": None,
+            "timed_out": False,
+            "schema_valid": True,
+            "runs": 1,
+            "task_ids": ["task-1"],
+            "trial_ids": [],
+        }
+    ]
+
+
+def test_write_run_artifacts_writes_redacted_bounded_transcripts(tmp_path: Path) -> None:
+    task = make_probe_task("transcript-task", seed=1)
+    results = [
+        _result(
+            "provider-arm",
+            task_id=task.id,
+            cache_policy=CachePolicy.WARM,
+            cache_state=CacheState.WARMUP,
+            cache_namespace="cache-a",
+            cache_warmup_run=True,
+            raw={
+                "model_turns": [
+                    {
+                        "provider_name": "fake",
+                        "Authorization": "Bearer live-secret",
+                        "provider_raw": {
+                            "api_key": "sk-test-secret",
+                            "payload": "x" * 600,
+                        },
+                    }
+                ]
+            },
+        )
+    ]
+
+    write_run_artifacts(tmp_path, [task], results)
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "transcripts.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["task_id"] == task.id
+    assert row["arm_name"] == "provider-arm"
+    assert row["cache_policy"] == "warm"
+    assert row["cache_state"] == "warmup"
+    assert row["cache_namespace"] == "cache-a"
+    assert row["cache_warmup_run"] is True
+    assert isinstance(row["transcript_hash"], str)
+    turn = row["model_turns"][0]
+    assert turn["Authorization"] == "[REDACTED]"
+    assert turn["provider_raw"]["api_key"] == "[REDACTED]"
+    assert turn["provider_raw"]["payload"]["truncated"] is True
+    assert turn["provider_raw"]["payload"]["original_chars"] == 600
+    assert "live-secret" not in (tmp_path / "transcripts.jsonl").read_text(encoding="utf-8")
+    assert "sk-test-secret" not in (tmp_path / "transcripts.jsonl").read_text(encoding="utf-8")
 
 
 def test_write_run_artifacts_keeps_existing_summary_results_and_report_artifacts(

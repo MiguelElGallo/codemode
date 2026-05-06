@@ -304,7 +304,7 @@ def summarize_cache_cohorts(results: list[ArmResult]) -> list[dict[str, object]]
         groups.setdefault(key, []).append(result)
 
     rows: list[dict[str, object]] = []
-    for key in sorted(groups, key=lambda item: tuple("" if value is None else value for value in item)):
+    for key in sorted(groups, key=_sortable_group_key):
         arm_name, cache_policy, cache_state, cache_namespace = key
         arm_summary = _summarize_arm(groups[key])
         rows.append(
@@ -334,6 +334,62 @@ def summarize_cache_cohorts(results: list[ArmResult]) -> list[dict[str, object]]
     return rows
 
 
+def summarize_failure_modes(results: list[ArmResult]) -> list[dict[str, object]]:
+    groups: dict[tuple[object, ...], list[ArmResult]] = {}
+    for result in results:
+        if _is_success(result):
+            continue
+        key = (
+            result.arm_name,
+            (
+                result.execution.trace.failure_category.value
+                if result.execution.trace.failure_category is not None
+                else None
+            ),
+            result.execution.error,
+            (
+                result.score.failure_reason.value
+                if result.score.failure_reason is not None
+                else None
+            ),
+            result.timed_out,
+            result.score.schema_valid,
+        )
+        groups.setdefault(key, []).append(result)
+
+    rows: list[dict[str, object]] = []
+    for key in sorted(groups, key=lambda item: tuple("" if value is None else value for value in item)):
+        (
+            arm_name,
+            failure_category,
+            execution_error,
+            score_failure_reason,
+            timed_out,
+            schema_valid,
+        ) = key
+        grouped_results = groups[key]
+        rows.append(
+            {
+                "arm_name": arm_name,
+                "failure_category": failure_category,
+                "execution_error": execution_error,
+                "score_failure_reason": score_failure_reason,
+                "timed_out": timed_out,
+                "schema_valid": schema_valid,
+                "runs": len(grouped_results),
+                "task_ids": sorted({result.task_id for result in grouped_results}),
+                "trial_ids": sorted(
+                    {result.trial_id for result in grouped_results if result.trial_id is not None}
+                ),
+            }
+        )
+    return rows
+
+
+def _sortable_group_key(group_key: tuple[object, ...]) -> tuple[object, ...]:
+    return tuple("" if value is None else value for value in group_key)
+
+
 def _summarize_arm(results: list[ArmResult]) -> dict[str, object]:
     runs = len(results)
     latencies = [result.latency_ms for result in results]
@@ -344,14 +400,7 @@ def _summarize_arm(results: list[ArmResult]) -> dict[str, object]:
     tool_bytes = sum(result.execution.usage.tool_response_bytes_total for result in results)
     visible_fraction = model_visible / tool_bytes if tool_bytes else None
     suppression = 1 - visible_fraction if visible_fraction is not None else None
-    successes = [
-        result
-        for result in results
-        if result.score.schema_valid
-        and result.score.failure_reason is None
-        and not result.timed_out
-        and result.execution.error is None
-    ]
+    successes = [result for result in results if _is_success(result)]
     return {
         "runs": runs,
         "schema_valid": sum(1 for result in results if result.score.schema_valid),
@@ -402,6 +451,15 @@ def _summarize_arm(results: list[ArmResult]) -> dict[str, object]:
         "visible_fraction": round(visible_fraction, 6) if visible_fraction is not None else None,
         "payload_suppression_ratio": round(suppression, 6) if suppression is not None else None,
     }
+
+
+def _is_success(result: ArmResult) -> bool:
+    return (
+        result.score.schema_valid
+        and result.score.failure_reason is None
+        and not result.timed_out
+        and result.execution.error is None
+    )
 
 
 def _paired_delta_row(

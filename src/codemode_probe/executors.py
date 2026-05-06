@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from codemode_probe.models import ExecutionResult, ProbeTask, UsageStats
+from codemode_probe.models import ExecutionContext, ExecutionResult, ProbeTask, UsageStats
 from codemode_probe.model_loop import DirectMcpAgentExecutor, ModelClient
 from codemode_probe.mcp_client import DirectMcpSyntheticToolClient
 from codemode_probe.oracle import rank_candidates
@@ -13,14 +13,24 @@ from codemode_probe.workload import generate_candidates
 class CandidateExecutor(Protocol):
     name: str
 
-    def execute(self, task: ProbeTask) -> ExecutionResult:
+    def execute(
+        self,
+        task: ProbeTask,
+        *,
+        context: ExecutionContext | None = None,
+    ) -> ExecutionResult:
         """Execute a benchmark task and return a normalized answer."""
 
 
 class DeterministicOracleExecutor:
     name = "deterministic_oracle_client"
 
-    def execute(self, task: ProbeTask) -> ExecutionResult:
+    def execute(
+        self,
+        task: ProbeTask,
+        *,
+        context: ExecutionContext | None = None,
+    ) -> ExecutionResult:
         candidates = generate_candidates(task.workload)
         answer = rank_candidates(task.id, candidates, task.workload.top_k)
         payload_bytes = sum(len(candidate.model_dump_json()) for candidate in candidates)
@@ -38,7 +48,12 @@ class DeterministicOracleExecutor:
 class InProcessToolOracleExecutor:
     name = "in_process_tool_oracle"
 
-    def execute(self, task: ProbeTask) -> ExecutionResult:
+    def execute(
+        self,
+        task: ProbeTask,
+        *,
+        context: ExecutionContext | None = None,
+    ) -> ExecutionResult:
         tools = InProcessSyntheticTools.from_task(task)
         return run_tool_oracle(task, tools)
 
@@ -46,7 +61,12 @@ class InProcessToolOracleExecutor:
 class CodeModeSyntheticScriptedExecutor:
     name = "code_mode_synthetic_scripted"
 
-    def execute(self, task: ProbeTask) -> ExecutionResult:
+    def execute(
+        self,
+        task: ProbeTask,
+        *,
+        context: ExecutionContext | None = None,
+    ) -> ExecutionResult:
         tools = InProcessSyntheticTools(
             generate_candidates(task.workload),
             tool_outputs_model_visible=False,
@@ -69,7 +89,12 @@ class DirectMcpToolOracleExecutor:
     def __init__(self, tool_client: DirectMcpSyntheticToolClient) -> None:
         self._tool_client = tool_client
 
-    def execute(self, task: ProbeTask) -> ExecutionResult:
+    def execute(
+        self,
+        task: ProbeTask,
+        *,
+        context: ExecutionContext | None = None,
+    ) -> ExecutionResult:
         return run_tool_oracle(task, self._tool_client)
 
 
@@ -83,5 +108,10 @@ class DirectMcpAgentParallelExecutor:
     ) -> None:
         self._executor = DirectMcpAgentExecutor(tool_client, model_client)
 
-    def execute(self, task: ProbeTask) -> ExecutionResult:
-        return self._executor.execute(task)
+    def execute(
+        self,
+        task: ProbeTask,
+        *,
+        context: ExecutionContext | None = None,
+    ) -> ExecutionResult:
+        return self._executor.execute(task, context=context)

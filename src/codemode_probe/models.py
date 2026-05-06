@@ -190,12 +190,22 @@ class NormalizedModelUsage(BaseModel):
     cache_write_tokens: int | None = Field(default=None, ge=0)
 
 
+class ExecutionContext(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    cache_policy: CachePolicy = CachePolicy.UNSPECIFIED
+    cache_state: CacheState = CacheState.UNSPECIFIED
+    cache_namespace: str | None = None
+    cache_warmup_run: bool = False
+
+
 class ModelTurnRequest(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     task: ProbeTask
     turn_index: int = Field(ge=1)
     tool_results: list[NormalizedToolResult] = Field(default_factory=list)
+    context: ExecutionContext = Field(default_factory=ExecutionContext)
 
 
 class ModelTurnResult(BaseModel):

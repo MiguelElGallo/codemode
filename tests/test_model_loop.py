@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import Counter
 
 import pytest
@@ -13,6 +14,9 @@ from codemode_probe.mcp_adapter import build_synthetic_mcp_server
 from codemode_probe.mcp_client import DirectMcpSyntheticToolClient, FastMcpInProcessSession
 from codemode_probe.model_loop import DirectMcpAgentExecutor, ScriptedFanoutModelClient
 from codemode_probe.models import (
+    CachePolicy,
+    CacheState,
+    ExecutionContext,
     ModelTurnRequest,
     ModelTurnResult,
     FailureCategory,
@@ -290,6 +294,41 @@ class InvalidFinalAnswerModelClient:
         )
 
 
+class FailingSecondTurnModelClient:
+    async def run_turn(self, request: ModelTurnRequest) -> ModelTurnResult:
+        if request.turn_index == 1:
+            return ModelTurnResult(
+                tool_requests=[
+                    NormalizedToolRequest(
+                        id="search-0",
+                        name="search_shard",
+                        arguments={"shard_id": 0},
+                    )
+                ],
+                usage=NormalizedModelUsage(input_tokens=11, output_tokens=3),
+                raw={"turn": "before_provider_failure"},
+            )
+        raise RuntimeError("provider unavailable")
+
+
+class SlowModelClient:
+    async def run_turn(self, request: ModelTurnRequest) -> ModelTurnResult:
+        time.sleep(request.task.timeout_seconds * 2)
+        return ModelTurnResult(raw={"turn": "too_late"})
+
+
+class RecordingContextModelClient:
+    def __init__(self) -> None:
+        self.requests: list[ModelTurnRequest] = []
+
+    async def run_turn(self, request: ModelTurnRequest) -> ModelTurnResult:
+        self.requests.append(request)
+        return ModelTurnResult(
+            final_answer=StructuredAnswer(task_id=request.task.id, candidates=[]),
+            raw={"turn": "record_context"},
+        )
+
+
 def test_direct_mcp_agent_executor_counts_unknown_and_failed_tools() -> None:
     task = tiny_task(task_id="failed-tools")
 
@@ -368,6 +407,70 @@ def test_direct_mcp_agent_executor_classifies_invalid_final_answer_schema() -> N
     assert result.trace.failure_category == FailureCategory.SCHEMA_FAILURE
     assert result.usage.model_requests == 1
     assert result.usage.tool_calls == 0
+
+
+def test_direct_mcp_agent_executor_contains_model_client_failures() -> None:
+    task = tiny_task(task_id="provider-failure")
+
+    result = DirectMcpAgentExecutor(
+        InProcessSyntheticTools.from_task(task),
+        FailingSecondTurnModelClient(),
+    ).execute(task)
+
+    assert result.answer is None
+    assert result.error == "RuntimeError:provider unavailable"
+    assert result.trace.failure_category == FailureCategory.PROVIDER_FAILURE
+    assert result.usage.model_requests == 2
+    assert result.usage.tool_calls == 1
+    assert result.usage.failed_tool_calls == 0
+    assert result.usage.input_tokens == 11
+    assert result.usage.output_tokens == 3
+    assert result.trace.span_count == 3
+    assert result.raw == {
+        "model_turns": [
+            {"turn": "before_provider_failure"},
+            {
+                "turn_index": 2,
+                "error": "RuntimeError:provider unavailable",
+                "failure_category": "provider_failure",
+            },
+        ]
+    }
+
+
+def test_direct_mcp_agent_executor_does_not_contain_runner_timeout() -> None:
+    task = tiny_task(task_id="runner-timeout").model_copy(update={"timeout_seconds": 0.01})
+
+    result = BenchmarkRunner(
+        DirectMcpAgentExecutor(
+            InProcessSyntheticTools.from_task(task),
+            SlowModelClient(),
+        )
+    ).run_task(task)
+
+    assert result.timed_out is True
+    assert result.execution.error == "timeout"
+    assert result.execution.trace.failure_category == FailureCategory.TIMEOUT
+
+
+def test_direct_mcp_agent_executor_propagates_execution_context_to_model_turns() -> None:
+    task = tiny_task(task_id="cache-context")
+    context = ExecutionContext(
+        cache_policy=CachePolicy.WARM,
+        cache_state=CacheState.WARMUP,
+        cache_namespace="provider-cache",
+        cache_warmup_run=True,
+    )
+    model = RecordingContextModelClient()
+
+    result = DirectMcpAgentExecutor(
+        InProcessSyntheticTools.from_task(task),
+        model,
+    ).execute(task, context=context)
+
+    assert result.error is None
+    assert len(model.requests) == 1
+    assert model.requests[0].context == context
 
 
 def test_benchmark_runner_scores_direct_mcp_agent_parallel_executor() -> None:

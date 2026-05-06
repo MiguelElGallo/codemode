@@ -10,6 +10,9 @@ from codemode_probe.mcp_adapter import build_synthetic_mcp_server
 from codemode_probe.mcp_client import DirectMcpSyntheticToolClient, FastMcpInProcessSession
 from codemode_probe.model_loop import DirectMcpAgentExecutor
 from codemode_probe.models import (
+    CachePolicy,
+    CacheState,
+    ExecutionContext,
     ModelTurnRequest,
     NormalizedModelUsage,
     NormalizedToolRequest,
@@ -90,6 +93,25 @@ def test_provider_backed_model_client_sends_rendered_prompt_with_task_parameters
         "top_k": task.workload.top_k,
     }
     assert request.rendered_prompt.canonical_hash == render_prompt(task).canonical_hash
+
+
+def test_provider_backed_model_client_forwards_execution_context() -> None:
+    task = tiny_task()
+    context = ExecutionContext(
+        cache_policy=CachePolicy.COLD_THEN_WARM,
+        cache_state=CacheState.WARMUP,
+        cache_namespace="live-provider-cache",
+        cache_warmup_run=True,
+    )
+    provider = RecordingProviderClient(ProviderTurnResponse(stop_reason="done"))
+
+    asyncio.run(
+        ProviderBackedModelClient(provider).run_turn(
+            ModelTurnRequest(task=task, turn_index=1, context=context)
+        )
+    )
+
+    assert provider.requests[0].context == context
 
 
 def test_provider_backed_model_client_returns_normalized_response_and_serializable_raw() -> None:

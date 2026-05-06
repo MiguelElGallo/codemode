@@ -63,7 +63,13 @@ def test_suite_fixed_order_is_stable_across_tasks_and_repetitions(
         def __init__(self, executor: SimpleNamespace) -> None:
             self.executor = executor
 
-        def run_task(self, task: ProbeTask, *, repetition: int = 1) -> SimpleNamespace:
+        def run_task(
+            self,
+            task: ProbeTask,
+            *,
+            repetition: int = 1,
+            context=None,
+        ) -> SimpleNamespace:
             calls.append((task.id, self.executor.name, repetition))
             return FakeArmResult(
                 task_id=task.id,
@@ -105,7 +111,13 @@ def test_suite_randomized_order_is_deterministic_by_seed(
         def __init__(self, executor: SimpleNamespace) -> None:
             self.executor = executor
 
-        def run_task(self, task: ProbeTask, *, repetition: int = 1) -> SimpleNamespace:
+        def run_task(
+            self,
+            task: ProbeTask,
+            *,
+            repetition: int = 1,
+            context=None,
+        ) -> SimpleNamespace:
             return FakeArmResult(
                 task_id=task.id,
                 arm_name=self.executor.name,
@@ -194,6 +206,57 @@ def test_suite_records_cache_cohort_metadata_per_result() -> None:
     ]
     assert [result.cache_namespace for result in results] == ["docs-demo"] * 4
     assert [result.cache_warmup_run for result in results] == [False, True, True, False]
+
+
+def test_suite_passes_cache_context_to_runner_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contexts = []
+
+    class FakeRunner:
+        def __init__(self, executor: SimpleNamespace) -> None:
+            self.executor = executor
+
+        def run_task(
+            self,
+            task: ProbeTask,
+            *,
+            repetition: int = 1,
+            context=None,
+        ) -> SimpleNamespace:
+            contexts.append(context)
+            return FakeArmResult(
+                task_id=task.id,
+                arm_name=self.executor.name,
+                repetition=repetition,
+            )
+
+    monkeypatch.setattr(suite, "build_executor", lambda arm, task: SimpleNamespace(name=arm))
+    monkeypatch.setattr(suite, "BenchmarkRunner", FakeRunner)
+
+    run_benchmark_suite(
+        [tiny_task("cache-context-suite", seed=1)],
+        BenchmarkSuiteConfig(
+            arms=("deterministic_oracle",),
+            repetitions=3,
+            cache_policy=CachePolicy.COLD_THEN_WARM,
+            cache_namespace="suite-cache",
+            cache_warmup_repetitions=1,
+        ),
+    )
+
+    assert [context.cache_state for context in contexts] == [
+        CacheState.COLD,
+        CacheState.WARMUP,
+        CacheState.WARM,
+    ]
+    assert [context.cache_policy for context in contexts] == [
+        CachePolicy.COLD_THEN_WARM,
+        CachePolicy.COLD_THEN_WARM,
+        CachePolicy.COLD_THEN_WARM,
+    ]
+    assert [context.cache_namespace for context in contexts] == ["suite-cache"] * 3
+    assert [context.cache_warmup_run for context in contexts] == [False, True, False]
 
 
 def test_suite_warm_cache_policy_marks_configured_warmup_repetitions() -> None:

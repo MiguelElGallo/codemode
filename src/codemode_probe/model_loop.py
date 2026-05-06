@@ -5,6 +5,7 @@ from typing import Protocol
 
 from codemode_probe.models import (
     Candidate,
+    ExecutionContext,
     ExecutionResult,
     FailureCategory,
     ModelTurnRequest,
@@ -33,10 +34,15 @@ class DirectMcpAgentExecutor:
         self._tool_client = tool_client
         self._model_client = model_client
 
-    def execute(self, task: ProbeTask) -> ExecutionResult:
-        return asyncio.run(self._execute_async(task))
+    def execute(
+        self,
+        task: ProbeTask,
+        *,
+        context: ExecutionContext | None = None,
+    ) -> ExecutionResult:
+        return asyncio.run(self._execute_async(task, context or ExecutionContext()))
 
-    async def _execute_async(self, task: ProbeTask) -> ExecutionResult:
+    async def _execute_async(self, task: ProbeTask, context: ExecutionContext) -> ExecutionResult:
         tool_results: list[NormalizedToolResult] = []
         model_usage = _UsageAccumulator()
         model_turns: list[dict[str, object]] = []
@@ -44,13 +50,34 @@ class DirectMcpAgentExecutor:
         attempted_tool_calls = 0
 
         for turn_index in range(1, task.max_tool_calls + 2):
-            model_result = await self._model_client.run_turn(
-                ModelTurnRequest(
-                    task=task,
-                    turn_index=turn_index,
-                    tool_results=tool_results,
+            try:
+                model_result = await self._model_client.run_turn(
+                    ModelTurnRequest(
+                        task=task,
+                        turn_index=turn_index,
+                        tool_results=tool_results,
+                        context=context,
+                    )
                 )
-            )
+            except Exception as exc:
+                failure_category = _classify_model_exception(exc)
+                model_turns.append(
+                    {
+                        "turn_index": turn_index,
+                        "error": _exception_label(exc),
+                        "failure_category": failure_category.value,
+                    }
+                )
+                return self._execution_result(
+                    answer=None,
+                    model_requests=turn_index,
+                    failed_tool_calls=failed_tool_calls,
+                    attempted_tool_calls=attempted_tool_calls,
+                    model_usage=model_usage,
+                    model_turns=model_turns,
+                    error=_exception_label(exc),
+                    failure_category=failure_category,
+                )
             model_usage.add(model_result.usage)
             model_turns.append(model_result.raw)
 
@@ -248,6 +275,18 @@ class _UsageAccumulator:
         self.output_tokens = _add_optional(self.output_tokens, usage.output_tokens)
         self.cache_read_tokens = _add_optional(self.cache_read_tokens, usage.cache_read_tokens)
         self.cache_write_tokens = _add_optional(self.cache_write_tokens, usage.cache_write_tokens)
+
+
+def _classify_model_exception(exc: Exception) -> FailureCategory:
+    if isinstance(exc, TimeoutError):
+        return FailureCategory.PROVIDER_FAILURE
+    if isinstance(exc, (TypeError, ValueError, KeyError)):
+        return FailureCategory.ADAPTER_FAILURE
+    return FailureCategory.PROVIDER_FAILURE
+
+
+def _exception_label(exc: Exception) -> str:
+    return f"{type(exc).__name__}:{exc}"
 
 
 def _parse_final_answer(answer: StructuredAnswer | dict[str, object]) -> StructuredAnswer:
