@@ -13,6 +13,17 @@ def score_answer(
     *,
     timed_out: bool = False,
 ) -> ScoreResult:
+    if timed_out:
+        return ScoreResult(
+            schema_valid=False,
+            timed_out=True,
+            top_k_overlap=0.0,
+            precision_at_k=0.0,
+            recall_at_k=0.0,
+            ndcg_at_k=0.0,
+            failure_reason=ScoreFailureReason.TIMEOUT,
+        )
+
     parsed = _parse_answer(answer)
     if parsed is None:
         return ScoreResult(

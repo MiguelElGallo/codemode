@@ -115,6 +115,18 @@ def test_score_answer_rejects_invalid_schema() -> None:
     assert result.ndcg_at_k == 0.0
 
 
+def test_score_answer_classifies_timeout_before_schema_validation() -> None:
+    oracle = answer("task-1", ["expected"])
+
+    result = score_answer({}, oracle, timed_out=True)
+
+    assert result.schema_valid is False
+    assert result.timed_out is True
+    assert result.failure_reason == ScoreFailureReason.TIMEOUT
+    assert result.top_k_overlap == 0.0
+    assert result.ndcg_at_k == 0.0
+
+
 def test_score_answer_reports_overlap_precision_and_recall() -> None:
     oracle = answer("task-1", ["a", "b", "c", "d"])
     actual = answer("task-1", ["d", "x", "b"])

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from codemode_probe import suite
-from codemode_probe.models import ProbeTask, ToolShape
+from codemode_probe.models import CachePolicy, CacheState, ProbeTask, ToolShape
 from codemode_probe.suite import BenchmarkSuiteConfig, run_benchmark_suite
 from codemode_probe.workload import make_probe_task
 
@@ -166,6 +166,52 @@ def test_suite_records_trial_identity_and_arm_execution_order() -> None:
             "deterministic_oracle_client",
         )
     }
+
+
+def test_suite_records_cache_cohort_metadata_per_result() -> None:
+    results = run_benchmark_suite(
+        [tiny_task("cache-task", seed=1)],
+        BenchmarkSuiteConfig(
+            arms=("deterministic_oracle",),
+            repetitions=4,
+            cache_policy=CachePolicy.COLD_THEN_WARM,
+            cache_namespace="docs-demo",
+            cache_warmup_repetitions=2,
+        ),
+    )
+
+    assert [result.cache_policy for result in results] == [
+        CachePolicy.COLD_THEN_WARM,
+        CachePolicy.COLD_THEN_WARM,
+        CachePolicy.COLD_THEN_WARM,
+        CachePolicy.COLD_THEN_WARM,
+    ]
+    assert [result.cache_state for result in results] == [
+        CacheState.COLD,
+        CacheState.WARMUP,
+        CacheState.WARMUP,
+        CacheState.WARM,
+    ]
+    assert [result.cache_namespace for result in results] == ["docs-demo"] * 4
+    assert [result.cache_warmup_run for result in results] == [False, True, True, False]
+
+
+def test_suite_warm_cache_policy_marks_configured_warmup_repetitions() -> None:
+    results = run_benchmark_suite(
+        [tiny_task("warm-cache-task", seed=1)],
+        BenchmarkSuiteConfig(
+            arms=("deterministic_oracle",),
+            repetitions=3,
+            cache_policy=CachePolicy.WARM,
+            cache_warmup_repetitions=2,
+        ),
+    )
+
+    assert [result.cache_state for result in results] == [
+        CacheState.WARMUP,
+        CacheState.WARMUP,
+        CacheState.WARM,
+    ]
 
 
 def test_suite_builds_fresh_direct_mcp_agent_parallel_executor_per_repetition() -> None:

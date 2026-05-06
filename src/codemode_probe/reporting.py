@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import random
 from statistics import median
 
 from codemode_probe.models import ArmResult, ProbeTask
@@ -55,7 +56,7 @@ def render_summary_markdown(
             "",
             "Payload suppression is `1 - model_visible_bytes_total / tool_response_bytes_total`.",
             f"Pairwise deltas use `{paired_baseline_arm}` as the baseline when present.",
-            "Cold/warm cache cohorts are not separated in this run metadata yet.",
+            "Cache cohorts are recorded as run/result metadata; provider cache enforcement is adapter-specific.",
             "",
         ]
     )
@@ -67,11 +68,11 @@ def summarize_paired_deltas(
     *,
     baseline_arm: str,
 ) -> list[dict[str, object]]:
-    by_key: dict[tuple[str, int, str | None], dict[str, ArmResult]] = {}
+    by_key: dict[tuple[str, int, str | None], dict[str, list[ArmResult]]] = {}
     for result in results:
         by_key.setdefault(
             (result.task_id, result.repetition, result.trial_id), {}
-        )[result.arm_name] = result
+        ).setdefault(result.arm_name, []).append(result)
 
     rows: list[dict[str, object]] = []
     for task_id, repetition, trial_id in sorted(
@@ -79,13 +80,16 @@ def summarize_paired_deltas(
         key=lambda key: (key[0], key[1], key[2] or ""),
     ):
         arm_results = by_key[(task_id, repetition, trial_id)]
-        baseline = arm_results.get(baseline_arm)
-        if baseline is None:
+        if any(len(duplicates) != 1 for duplicates in arm_results.values()):
             continue
+        baseline_rows = arm_results.get(baseline_arm)
+        if baseline_rows is None:
+            continue
+        baseline = baseline_rows[0]
         for arm_name in sorted(arm_results):
             if arm_name == baseline_arm:
                 continue
-            comparison = arm_results[arm_name]
+            comparison = arm_results[arm_name][0]
             rows.append(_paired_delta_row(task_id, repetition, baseline, comparison))
     return rows
 
@@ -118,6 +122,7 @@ def summarize_pairing_coverage(
             len(rows) for arm_name, rows in arm_results.items() if arm_name != baseline_arm
         )
         comparison_results_total += comparison_count
+        has_duplicate_arm_rows = any(len(rows) > 1 for rows in arm_results.values())
         if baseline_count == 0:
             trials_missing_baseline += 1
             missing_baseline_trial_keys.append(
@@ -128,7 +133,7 @@ def summarize_pairing_coverage(
                     "comparison_results": comparison_count,
                 }
             )
-        else:
+        elif not has_duplicate_arm_rows:
             paired_comparisons_total += comparison_count
 
         duplicate_trial_arm_groups += sum(1 for rows in arm_results.values() if len(rows) > 1)
@@ -194,6 +199,50 @@ def summarize_paired_delta_groups(
     return summaries
 
 
+def summarize_paired_uncertainty(
+    paired_deltas: list[dict[str, object]],
+    *,
+    bootstrap_iterations: int = 1000,
+    random_seed: int = 1,
+) -> list[dict[str, object]]:
+    groups: dict[tuple[str, str], list[dict[str, object]]] = {}
+    for row in paired_deltas:
+        groups.setdefault(
+            (str(row["baseline_arm"]), str(row["comparison_arm"])),
+            [],
+        ).append(row)
+
+    summaries: list[dict[str, object]] = []
+    for baseline_arm, comparison_arm in sorted(groups):
+        rows = groups[(baseline_arm, comparison_arm)]
+        rng = random.Random(f"{random_seed}:{baseline_arm}:{comparison_arm}")
+        summaries.append(
+            {
+                "baseline_arm": baseline_arm,
+                "comparison_arm": comparison_arm,
+                "pairs": len(rows),
+                "bootstrap_iterations": bootstrap_iterations,
+                "metrics": {
+                    metric: _bootstrap_metric_summary(
+                        [float(row[metric]) for row in rows],
+                        rng=rng,
+                        iterations=bootstrap_iterations,
+                    )
+                    for metric in (
+                        "delta_ndcg_at_k",
+                        "delta_top_k_overlap",
+                        "delta_latency_ms",
+                        "delta_model_requests",
+                        "delta_tool_calls",
+                        "delta_tool_response_bytes",
+                        "delta_model_visible_bytes",
+                    )
+                },
+            }
+        )
+    return summaries
+
+
 def summarize_workload_regimes(
     tasks: list[ProbeTask],
     results: list[ArmResult],
@@ -234,6 +283,48 @@ def summarize_workload_regimes(
                 "p95_latency_ms": arm_summary["p95_latency_ms"],
                 "mean_tool_calls": arm_summary["mean_tool_calls"],
                 "mean_model_requests": arm_summary["mean_model_requests"],
+                "tool_response_bytes_total": arm_summary["tool_response_bytes_total"],
+                "model_visible_bytes_total": arm_summary["model_visible_bytes_total"],
+                "visible_fraction": arm_summary["visible_fraction"],
+                "payload_suppression_ratio": arm_summary["payload_suppression_ratio"],
+            }
+        )
+    return rows
+
+
+def summarize_cache_cohorts(results: list[ArmResult]) -> list[dict[str, object]]:
+    groups: dict[tuple[object, ...], list[ArmResult]] = {}
+    for result in results:
+        key = (
+            result.arm_name,
+            result.cache_policy.value,
+            result.cache_state.value,
+            result.cache_namespace,
+        )
+        groups.setdefault(key, []).append(result)
+
+    rows: list[dict[str, object]] = []
+    for key in sorted(groups, key=lambda item: tuple("" if value is None else value for value in item)):
+        arm_name, cache_policy, cache_state, cache_namespace = key
+        arm_summary = _summarize_arm(groups[key])
+        rows.append(
+            {
+                "arm_name": arm_name,
+                "cache_policy": cache_policy,
+                "cache_state": cache_state,
+                "cache_namespace": cache_namespace,
+                "runs": arm_summary["runs"],
+                "success_rate": arm_summary["success_rate"],
+                "mean_ndcg_at_k": arm_summary["mean_ndcg_at_k"],
+                "mean_top_k_overlap": arm_summary["mean_top_k_overlap"],
+                "median_latency_ms": arm_summary["median_latency_ms"],
+                "p95_latency_ms": arm_summary["p95_latency_ms"],
+                "mean_model_requests": arm_summary["mean_model_requests"],
+                "mean_tool_calls": arm_summary["mean_tool_calls"],
+                "input_tokens_total": arm_summary["input_tokens_total"],
+                "output_tokens_total": arm_summary["output_tokens_total"],
+                "cache_read_tokens_total": arm_summary["cache_read_tokens_total"],
+                "cache_write_tokens_total": arm_summary["cache_write_tokens_total"],
                 "tool_response_bytes_total": arm_summary["tool_response_bytes_total"],
                 "model_visible_bytes_total": arm_summary["model_visible_bytes_total"],
                 "visible_fraction": arm_summary["visible_fraction"],
@@ -361,6 +452,42 @@ def _mean(values: list[float]) -> float:
     if not values:
         return 0.0
     return round(sum(values) / len(values), 6)
+
+
+def _bootstrap_metric_summary(
+    values: list[float],
+    *,
+    rng: random.Random,
+    iterations: int,
+) -> dict[str, object]:
+    if not values:
+        return {"mean": None, "ci95_low": None, "ci95_high": None}
+    if len(values) == 1 or iterations <= 0:
+        mean_value = _mean(values)
+        return {
+            "mean": mean_value,
+            "ci95_low": mean_value,
+            "ci95_high": mean_value,
+        }
+
+    bootstrapped_means = []
+    for _ in range(iterations):
+        sample = [values[rng.randrange(len(values))] for _ in values]
+        bootstrapped_means.append(_mean(sample))
+
+    sorted_means = sorted(bootstrapped_means)
+    return {
+        "mean": _mean(values),
+        "ci95_low": _quantile(sorted_means, 0.025),
+        "ci95_high": _quantile(sorted_means, 0.975),
+    }
+
+
+def _quantile(sorted_values: list[float], quantile: float) -> float:
+    if not sorted_values:
+        return 0.0
+    index = max(0, min(len(sorted_values) - 1, round((len(sorted_values) - 1) * quantile)))
+    return round(sorted_values[index], 6)
 
 
 def _ratio(numerator: int, denominator: int) -> float:

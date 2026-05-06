@@ -89,12 +89,16 @@ summary.json
 paired_deltas.json
 pairing_coverage.json
 paired_delta_summary.json
+paired_uncertainty.json
+cache_cohorts.json
+preflight.json
 workload_regimes.json
 report.md
 ```
 
 `results.jsonl` is the canonical machine-readable record. `summary.json`,
-`paired_deltas.json`, `pairing_coverage.json`, `paired_delta_summary.json`, and
+`paired_deltas.json`, `pairing_coverage.json`, `paired_delta_summary.json`,
+`paired_uncertainty.json`, `cache_cohorts.json`, `preflight.json`, and
 `workload_regimes.json` are derived from it. `report.md` is presentation-only.
 
 `manifest.json` records the normalized arms, selected paired-delta baseline,
@@ -117,8 +121,9 @@ Payload suppression is:
 1 - model_visible_bytes_total / tool_response_bytes_total
 ```
 
-Cold/warm cache state is not instrumented yet. Repetitions are repeated
-measurements, not cache-warm trials.
+Cache cohorts are recorded in `results.jsonl`, `manifest.json`, and
+`cache_cohorts.json`. Provider adapters are still responsible for enforcing any
+real provider-side cache behavior.
 
 `pairing_coverage.json` records how many trial groups had the configured
 paired-delta baseline, how many comparison results were paired, and how many

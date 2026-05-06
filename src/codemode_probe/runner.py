@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import signal
+import threading
 from time import perf_counter
 
 from codemode_probe.executors import CandidateExecutor
-from codemode_probe.models import ArmResult, ProbeTask
+from codemode_probe.models import ArmResult, ExecutionResult, FailureCategory, ProbeTask, TraceSummary
 from codemode_probe.oracle import rank_candidates
 from codemode_probe.provenance import build_result_provenance
 from codemode_probe.scoring import score_answer
@@ -16,7 +18,7 @@ class BenchmarkRunner:
 
     def run_task(self, task: ProbeTask, *, repetition: int = 1) -> ArmResult:
         started = perf_counter()
-        execution = self.executor.execute(task)
+        execution, timed_out = _execute_with_timeout(self.executor, task)
         latency_ms = (perf_counter() - started) * 1000
 
         candidates = generate_candidates(task.workload)
@@ -28,6 +30,7 @@ class BenchmarkRunner:
         score = score_answer(
             execution.answer.model_dump() if execution.answer is not None else {},
             oracle,
+            timed_out=timed_out,
         )
 
         return ArmResult(
@@ -35,6 +38,7 @@ class BenchmarkRunner:
             arm_name=self.executor.name,
             repetition=repetition,
             latency_ms=round(latency_ms, 3),
+            timed_out=timed_out,
             provenance=build_result_provenance(
                 task,
                 executor_name=self.executor.name,
@@ -62,3 +66,54 @@ def _executor_config(executor: CandidateExecutor) -> dict[str, object]:
     if not isinstance(config, dict):
         return {"value": config}
     return config
+
+
+class _TaskTimeout(TimeoutError):
+    pass
+
+
+def _execute_with_timeout(
+    executor: CandidateExecutor,
+    task: ProbeTask,
+) -> tuple[ExecutionResult, bool]:
+    if not _can_use_signal_timeout():
+        return executor.execute(task), False
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+    timeout_started = perf_counter()
+    signal.signal(signal.SIGALRM, _raise_task_timeout)
+    signal.setitimer(signal.ITIMER_REAL, task.timeout_seconds)
+    try:
+        return executor.execute(task), False
+    except _TaskTimeout:
+        return (
+            ExecutionResult(
+                trace=TraceSummary(failure_category=FailureCategory.TIMEOUT),
+                error="timeout",
+            ),
+            True,
+        )
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            elapsed_seconds = perf_counter() - timeout_started
+            remaining_seconds = max(1e-6, previous_timer[0] - elapsed_seconds)
+            signal.setitimer(
+                signal.ITIMER_REAL,
+                remaining_seconds,
+                previous_timer[1],
+            )
+
+
+def _can_use_signal_timeout() -> bool:
+    return (
+        hasattr(signal, "SIGALRM")
+        and hasattr(signal, "setitimer")
+        and threading.current_thread() is threading.main_thread()
+    )
+
+
+def _raise_task_timeout(signum, frame) -> None:
+    raise _TaskTimeout("task execution timed out")

@@ -11,13 +11,16 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from codemode_probe.models import ArmResult, ProbeTask
+from codemode_probe.preflight import PreflightCheckResult
 from codemode_probe.prompts import render_prompt
 from codemode_probe.provenance import benchmark_protocol_metadata, git_source_metadata
 from codemode_probe.reporting import (
     render_summary_markdown,
+    summarize_cache_cohorts,
     summarize_pairing_coverage,
     summarize_paired_delta_groups,
     summarize_paired_deltas,
+    summarize_paired_uncertainty,
     summarize_results,
     summarize_workload_regimes,
 )
@@ -40,6 +43,7 @@ def write_run_artifacts(
     results: list[ArmResult],
     *,
     suite_config: BenchmarkSuiteConfig | None = None,
+    preflight_results: list[PreflightCheckResult] | None = None,
 ) -> None:
     manifest = {
         "schema_version": SCHEMA_VERSION,
@@ -76,7 +80,10 @@ def write_run_artifacts(
         summarize_pairing_coverage(results, baseline_arm=paired_baseline_arm),
     )
     _write_json(run_dir / "paired_delta_summary.json", summarize_paired_delta_groups(paired_deltas))
+    _write_json(run_dir / "paired_uncertainty.json", summarize_paired_uncertainty(paired_deltas))
     _write_json(run_dir / "workload_regimes.json", summarize_workload_regimes(tasks, results))
+    _write_json(run_dir / "cache_cohorts.json", summarize_cache_cohorts(results))
+    _write_json(run_dir / "preflight.json", _preflight_payload(preflight_results))
     (run_dir / "report.md").write_text(
         render_summary_markdown(results, paired_baseline_arm=paired_baseline_arm),
         encoding="utf-8",
@@ -96,6 +103,8 @@ def _controls_metadata(suite_config: BenchmarkSuiteConfig | None) -> dict[str, o
             "random_seed": None,
             "paired_baseline_arm": DEFAULT_PAIRED_BASELINE_ARM,
             "cache_policy": "unspecified",
+            "cache_namespace": None,
+            "cache_warmup_repetitions": 0,
             "concurrency_policy": "sequential",
             "retry_policy": "none",
             "timeout_policy": "per-task timeout_seconds",
@@ -105,7 +114,9 @@ def _controls_metadata(suite_config: BenchmarkSuiteConfig | None) -> dict[str, o
         "arm_order": suite_config.arm_order,
         "random_seed": suite_config.random_seed,
         "paired_baseline_arm": suite_config.normalized_paired_baseline_arm,
-        "cache_policy": "unspecified",
+        "cache_policy": suite_config.cache_policy.value,
+        "cache_namespace": suite_config.cache_namespace,
+        "cache_warmup_repetitions": suite_config.cache_warmup_repetitions,
         "concurrency_policy": "sequential",
         "retry_policy": "none",
         "timeout_policy": "per-task timeout_seconds",
@@ -147,6 +158,23 @@ def _artifact_hashes(run_dir: Path) -> dict[str, dict[str, object]]:
         }
         for path in sorted(run_dir.iterdir())
         if path.is_file() and path.name != "manifest.json"
+    }
+
+
+def _preflight_payload(
+    preflight_results: list[PreflightCheckResult] | None,
+) -> dict[str, object]:
+    if preflight_results is None:
+        return {
+            "status": "not_run",
+            "passed": None,
+            "checks": [],
+        }
+    passed = all(result.passed for result in preflight_results)
+    return {
+        "status": "passed" if passed else "failed",
+        "passed": passed,
+        "checks": [result.model_dump(mode="json") for result in preflight_results],
     }
 
 

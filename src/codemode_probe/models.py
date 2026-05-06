@@ -19,6 +19,22 @@ class ToolShape(StrEnum):
     BATCH = "batch"
 
 
+class CachePolicy(StrEnum):
+    UNSPECIFIED = "unspecified"
+    DISABLED = "disabled"
+    COLD = "cold"
+    WARM = "warm"
+    COLD_THEN_WARM = "cold_then_warm"
+
+
+class CacheState(StrEnum):
+    UNSPECIFIED = "unspecified"
+    DISABLED = "disabled"
+    COLD = "cold"
+    WARMUP = "warmup"
+    WARM = "warm"
+
+
 class FailureCategory(StrEnum):
     PROVIDER_FAILURE = "provider_failure"
     MODEL_PROTOCOL_ERROR = "model_protocol_error"
@@ -225,6 +241,10 @@ class ArmResult(BaseModel):
     trial_id: str | None = None
     arm_order_index: int | None = Field(default=None, ge=0)
     arm_order: tuple[str, ...] = Field(default_factory=tuple)
+    cache_policy: CachePolicy = CachePolicy.UNSPECIFIED
+    cache_state: CacheState = CacheState.UNSPECIFIED
+    cache_namespace: str | None = None
+    cache_warmup_run: bool = False
     latency_ms: float = Field(ge=0.0)
     timed_out: bool = False
     provenance: ResultProvenance = Field(default_factory=ResultProvenance)

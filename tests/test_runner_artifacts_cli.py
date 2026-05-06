@@ -1,15 +1,26 @@
 from __future__ import annotations
 
 import json
+import signal
+import time
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from codemode_probe.artifacts import create_run_dir, summarize_results, write_run_artifacts
 from codemode_probe.cli import main
 from codemode_probe.executors import DeterministicOracleExecutor
-from codemode_probe.models import ExecutionResult, ProbeTask, UsageStats
+from codemode_probe.models import (
+    CachePolicy,
+    CacheState,
+    ExecutionResult,
+    FailureCategory,
+    ProbeTask,
+    ScoreFailureReason,
+    UsageStats,
+)
 from codemode_probe.prompts import render_prompt
 from codemode_probe.provenance import hash_candidate_set, hash_oracle_answer
 from codemode_probe.oracle import rank_candidates
@@ -94,6 +105,64 @@ def test_benchmark_runner_repetitions_and_result_contract() -> None:
     )
 
 
+def test_benchmark_runner_enforces_task_timeout() -> None:
+    class SlowExecutor:
+        name = "slow_executor"
+
+        def execute(self, task: ProbeTask) -> ExecutionResult:
+            time.sleep(1)
+            raise AssertionError("sleep should be interrupted by runner timeout")
+
+    task = tiny_task().model_copy(update={"timeout_seconds": 0.01})
+
+    result = BenchmarkRunner(SlowExecutor()).run_task(task)
+
+    assert result.timed_out is True
+    assert result.execution.error == "timeout"
+    assert result.execution.trace.failure_category == FailureCategory.TIMEOUT
+    assert result.score.timed_out is True
+    assert result.score.failure_reason == ScoreFailureReason.TIMEOUT
+    assert result.score.schema_valid is False
+    assert result.latency_ms < 500
+
+
+def test_benchmark_runner_restores_existing_signal_timer_without_extending_it() -> None:
+    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"):
+        pytest.skip("SIGALRM interval timers are unavailable on this platform")
+
+    class BriefExecutor:
+        name = "brief_executor"
+
+        def execute(self, task: ProbeTask) -> ExecutionResult:
+            time.sleep(0.05)
+            return ExecutionResult(
+                answer=rank_candidates(
+                    task.id,
+                    generate_candidates(task.workload),
+                    task.workload.top_k,
+                )
+            )
+
+    task = tiny_task().model_copy(update={"timeout_seconds": 1.0})
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+    signal.signal(signal.SIGALRM, lambda signum, frame: None)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 0.5)
+
+        result = BenchmarkRunner(BriefExecutor()).run_task(task)
+        restored_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+
+        assert result.timed_out is False
+        assert 0.1 < restored_timer[0] < 0.49
+        assert restored_timer[1] == 0.0
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+
+
 def test_artifact_creation_writing_and_summary_jsonl_stability(tmp_path: Path) -> None:
     task = tiny_task()
     results = BenchmarkRunner(DeterministicOracleExecutor()).run([task], repetitions=2)
@@ -148,6 +217,8 @@ def test_artifact_creation_writing_and_summary_jsonl_stability(tmp_path: Path) -
         "random_seed": None,
         "paired_baseline_arm": "direct_mcp_agent_parallel",
         "cache_policy": "unspecified",
+        "cache_namespace": None,
+        "cache_warmup_repetitions": 0,
         "concurrency_policy": "sequential",
         "retry_policy": "none",
         "timeout_policy": "per-task timeout_seconds",
@@ -192,7 +263,10 @@ def test_artifact_creation_writing_and_summary_jsonl_stability(tmp_path: Path) -
         "paired_deltas.json",
         "pairing_coverage.json",
         "paired_delta_summary.json",
+        "paired_uncertainty.json",
+        "cache_cohorts.json",
         "workload_regimes.json",
+        "preflight.json",
         "report.md",
     }
     results_path = run_dir / "results.jsonl"
@@ -221,6 +295,9 @@ def test_write_run_artifacts_manifest_includes_suite_config_when_provided(
         repetitions=3,
         arm_order="randomized",
         random_seed=42,
+        cache_policy=CachePolicy.WARM,
+        cache_namespace="suite-test",
+        cache_warmup_repetitions=1,
     )
 
     run_dir = create_run_dir(tmp_path, run_id="suite-manifest")
@@ -233,6 +310,9 @@ def test_write_run_artifacts_manifest_includes_suite_config_when_provided(
         "arm_order": "randomized",
         "random_seed": 42,
         "paired_baseline_arm": "direct_mcp_agent_parallel",
+        "cache_policy": "warm",
+        "cache_namespace": "suite-test",
+        "cache_warmup_repetitions": 1,
         "normalized_arms": [
             "direct_mcp_agent_parallel",
             "in_process_tool_oracle",
@@ -244,7 +324,9 @@ def test_write_run_artifacts_manifest_includes_suite_config_when_provided(
         "arm_order": "randomized",
         "random_seed": 42,
         "paired_baseline_arm": "direct_mcp_agent_parallel",
-        "cache_policy": "unspecified",
+        "cache_policy": "warm",
+        "cache_namespace": "suite-test",
+        "cache_warmup_repetitions": 1,
         "concurrency_policy": "sequential",
         "retry_policy": "none",
         "timeout_policy": "per-task timeout_seconds",
@@ -306,10 +388,66 @@ def test_cli_writes_artifacts_without_timestamp_assertions(
     assert (run_dir / "prompts.resolved.json").is_file()
     assert (run_dir / "results.jsonl").is_file()
     assert (run_dir / "summary.json").is_file()
+    preflight = json.loads((run_dir / "preflight.json").read_text())
+    assert preflight["status"] == "passed"
+    assert preflight["passed"] is True
+    assert preflight["checks"]
 
     summary = json.loads((run_dir / "summary.json").read_text())
     assert summary["schema_version"] == 1
     assert summary["arms"]["deterministic_oracle_client"]["runs"] == 2
+
+
+def test_cli_skip_preflight_records_not_run_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "skip-preflight",
+            "--skip-preflight",
+        ],
+    )
+
+    main()
+
+    preflight = json.loads((tmp_path / "skip-preflight" / "preflight.json").read_text())
+    assert preflight == {"status": "not_run", "passed": None, "checks": []}
+
+
+def test_cli_preflight_failure_raises_before_writing_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "failed-preflight",
+        ],
+    )
+    monkeypatch.setattr(
+        "codemode_probe.cli.run_preflight_checks",
+        lambda: [
+            SimpleNamespace(
+                name="bad-preflight",
+                passed=False,
+                details={},
+                model_dump=lambda mode="json": {},
+            )
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="preflight checks failed: bad-preflight"):
+        main()
+
+    assert not (tmp_path / "failed-preflight").exists()
 
 
 def test_cli_arms_selection_writes_one_result_row_per_arm(
@@ -357,6 +495,10 @@ def test_cli_arms_selection_writes_one_result_row_per_arm(
         ["deterministic_oracle_client", "in_process_tool_oracle"],
         ["deterministic_oracle_client", "in_process_tool_oracle"],
     ]
+    assert [row["cache_policy"] for row in rows] == ["unspecified", "unspecified"]
+    assert [row["cache_state"] for row in rows] == ["unspecified", "unspecified"]
+    assert [row["cache_namespace"] for row in rows] == [None, None]
+    assert [row["cache_warmup_run"] for row in rows] == [False, False]
     assert all(row["score"]["top_k_overlap"] == 1.0 for row in rows)
 
     summary = json.loads((run_dir / "summary.json").read_text())
@@ -733,6 +875,9 @@ def test_cli_delegates_arm_order_and_random_seed_to_suite_config(
         captured["arm_order"] = config.arm_order
         captured["random_seed"] = config.random_seed
         captured["paired_baseline_arm"] = config.paired_baseline_arm
+        captured["cache_policy"] = config.cache_policy
+        captured["cache_namespace"] = config.cache_namespace
+        captured["cache_warmup_repetitions"] = config.cache_warmup_repetitions
         return []
 
     monkeypatch.setattr(
@@ -755,6 +900,12 @@ def test_cli_delegates_arm_order_and_random_seed_to_suite_config(
             "42",
             "--paired-baseline-arm",
             "direct_agent",
+            "--cache-policy",
+            "warm",
+            "--cache-namespace",
+            "cli-cache",
+            "--cache-warmup-repetitions",
+            "1",
         ],
     )
     monkeypatch.setattr(
@@ -772,6 +923,9 @@ def test_cli_delegates_arm_order_and_random_seed_to_suite_config(
         "arm_order": "randomized",
         "random_seed": 42,
         "paired_baseline_arm": "direct_agent",
+        "cache_policy": CachePolicy.WARM,
+        "cache_namespace": "cli-cache",
+        "cache_warmup_repetitions": 1,
     }
     assert manifest["suite"] == {
         "arms": ["direct_agent", "in_process"],
@@ -779,6 +933,9 @@ def test_cli_delegates_arm_order_and_random_seed_to_suite_config(
         "arm_order": "randomized",
         "random_seed": 42,
         "paired_baseline_arm": "direct_agent",
+        "cache_policy": "warm",
+        "cache_namespace": "cli-cache",
+        "cache_warmup_repetitions": 1,
         "normalized_arms": [
             "direct_mcp_agent_parallel",
             "in_process_tool_oracle",

@@ -6,7 +6,8 @@ from pathlib import Path
 from codemode_probe.artifacts import create_run_dir, write_run_artifacts
 from codemode_probe.cases import CaseMatrixConfig, generate_case_tasks
 from codemode_probe.executor_factory import available_executor_ids
-from codemode_probe.models import ProbeTask, TaskFamily, ToolShape
+from codemode_probe.models import CachePolicy, ProbeTask, TaskFamily, ToolShape
+from codemode_probe.preflight import run_preflight_checks
 from codemode_probe.suite import BenchmarkSuiteConfig, run_benchmark_suite
 from codemode_probe.workload import make_probe_task
 
@@ -45,7 +46,34 @@ def main() -> None:
         default="direct_mcp_agent_parallel",
         help="Executor id used as the baseline in paired_deltas.json.",
     )
+    parser.add_argument(
+        "--cache-policy",
+        choices=[item.value for item in CachePolicy],
+        default=CachePolicy.UNSPECIFIED.value,
+        help="Cache cohort label recorded in manifest and result rows.",
+    )
+    parser.add_argument(
+        "--cache-namespace",
+        default=None,
+        help="Optional cache namespace label for grouping runs.",
+    )
+    parser.add_argument(
+        "--cache-warmup-repetitions",
+        type=int,
+        default=0,
+        help="Number of repetitions labeled as cache warmup before warm measurements.",
+    )
+    parser.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="Skip local synthetic preflight checks before running the benchmark.",
+    )
     args = parser.parse_args()
+
+    preflight_results = None if args.skip_preflight else run_preflight_checks()
+    if preflight_results is not None and not all(result.passed for result in preflight_results):
+        failed = ", ".join(result.name for result in preflight_results if not result.passed)
+        raise RuntimeError(f"preflight checks failed: {failed}")
 
     tasks = _tasks_from_args(args)
     arms = [arm.strip() for arm in args.arms.split(",") if arm.strip()]
@@ -55,11 +83,20 @@ def main() -> None:
         arm_order=args.arm_order,
         random_seed=args.random_seed,
         paired_baseline_arm=args.paired_baseline_arm,
+        cache_policy=CachePolicy(args.cache_policy),
+        cache_namespace=args.cache_namespace,
+        cache_warmup_repetitions=args.cache_warmup_repetitions,
     )
     results = run_benchmark_suite(tasks, suite_config)
 
     run_dir = create_run_dir(args.out, run_id=args.run_id)
-    write_run_artifacts(run_dir, tasks, results, suite_config=suite_config)
+    write_run_artifacts(
+        run_dir,
+        tasks,
+        results,
+        suite_config=suite_config,
+        preflight_results=preflight_results,
+    )
     print(run_dir)
 
 
