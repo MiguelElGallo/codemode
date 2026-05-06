@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from codemode_probe.models import ArmResult, ProbeTask
 from codemode_probe.prompts import render_prompt
+from codemode_probe.reporting import render_summary_markdown, summarize_results
 from codemode_probe.suite import BenchmarkSuiteConfig
 
 SCHEMA_VERSION = 1
@@ -47,32 +48,7 @@ def write_run_artifacts(
     )
     _write_jsonl(run_dir / "results.jsonl", results)
     _write_json(run_dir / "summary.json", summarize_results(results))
-
-
-def summarize_results(results: list[ArmResult]) -> dict[str, object]:
-    by_arm: dict[str, list[ArmResult]] = {}
-    for result in results:
-        by_arm.setdefault(result.arm_name, []).append(result)
-
-    arms = {}
-    for arm_name, arm_results in by_arm.items():
-        arms[arm_name] = {
-            "runs": len(arm_results),
-            "schema_valid": sum(1 for result in arm_results if result.score.schema_valid),
-            "mean_latency_ms": round(
-                sum(result.latency_ms for result in arm_results) / max(1, len(arm_results)),
-                3,
-            ),
-            "mean_top_k_overlap": round(
-                sum(result.score.top_k_overlap for result in arm_results)
-                / max(1, len(arm_results)),
-                6,
-            ),
-            "tool_response_bytes_total": sum(
-                result.execution.usage.tool_response_bytes_total for result in arm_results
-            ),
-        }
-    return {"schema_version": SCHEMA_VERSION, "arms": arms}
+    (run_dir / "report.md").write_text(render_summary_markdown(results), encoding="utf-8")
 
 
 def _write_json(path: Path, data: object) -> None:
