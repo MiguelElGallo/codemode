@@ -33,6 +33,15 @@ def test_render_prompt_canonical_hash_is_deterministic_and_canonical() -> None:
     payload = {
         "task_id": task.id,
         "prompt": task.prompt,
+        "task_parameters": {
+            "task_family": task.workload.task_family.value,
+            "tool_shape": task.workload.tool_shape.value,
+            "shard_count": task.workload.shard_count,
+            "candidates_per_shard": task.workload.candidates_per_shard,
+            "payload_bytes": task.workload.payload_bytes,
+            "relevant_fraction": task.workload.relevant_fraction,
+            "top_k": task.workload.top_k,
+        },
         "tool_specs": [tool.model_dump(mode="json") for tool in tool_specs],
         "answer_schema": StructuredAnswer.model_json_schema(),
         "max_tool_calls": task.max_tool_calls,

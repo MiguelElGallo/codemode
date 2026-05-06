@@ -139,3 +139,172 @@ def test_cli_writes_artifacts_without_timestamp_assertions(
     summary = json.loads((run_dir / "summary.json").read_text())
     assert summary["schema_version"] == 1
     assert summary["arms"]["deterministic_oracle_client"]["runs"] == 2
+
+
+def test_cli_arms_selection_writes_one_result_row_per_arm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "multi-arm",
+            "--arms",
+            "deterministic_oracle_client,in_process",
+            "--shards",
+            "2",
+            "--candidates-per-shard",
+            "3",
+            "--payload-bytes",
+            "8",
+            "--top-k",
+            "2",
+        ],
+    )
+
+    main()
+
+    run_dir = tmp_path / "multi-arm"
+    assert capsys.readouterr().out.strip() == str(run_dir)
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "results.jsonl").read_text().splitlines()
+    ]
+    assert [row["arm_name"] for row in rows] == [
+        "deterministic_oracle_client",
+        "in_process_tool_oracle",
+    ]
+    assert all(row["score"]["top_k_overlap"] == 1.0 for row in rows)
+
+    summary = json.loads((run_dir / "summary.json").read_text())
+    assert summary["arms"]["deterministic_oracle_client"]["runs"] == 1
+    assert summary["arms"]["in_process_tool_oracle"]["runs"] == 1
+
+
+def test_cli_workload_knobs_propagate_to_tasks_and_prompts_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "knobs",
+            "--task-id",
+            "knob-task",
+            "--seed",
+            "99",
+            "--task-family",
+            "batch_large_fanout",
+            "--tool-shape",
+            "batch",
+            "--shards",
+            "3",
+            "--candidates-per-shard",
+            "4",
+            "--payload-bytes",
+            "12",
+            "--relevant-fraction",
+            "0.75",
+            "--top-k",
+            "3",
+            "--max-tool-calls",
+            "17",
+            "--timeout-seconds",
+            "9.5",
+        ],
+    )
+
+    main()
+
+    run_dir = tmp_path / "knobs"
+    tasks = json.loads((run_dir / "tasks.resolved.json").read_text())
+    prompts = json.loads((run_dir / "prompts.resolved.json").read_text())
+
+    assert tasks[0]["id"] == "knob-task"
+    assert tasks[0]["workload"] == {
+        "seed": 99,
+        "task_family": "batch_large_fanout",
+        "tool_shape": "batch",
+        "shard_count": 3,
+        "candidates_per_shard": 4,
+        "payload_bytes": 12,
+        "relevant_fraction": 0.75,
+        "top_k": 3,
+    }
+    assert tasks[0]["max_tool_calls"] == 17
+    assert tasks[0]["timeout_seconds"] == 9.5
+    assert prompts[0]["task_parameters"] == {
+        "task_family": "batch_large_fanout",
+        "tool_shape": "batch",
+        "shard_count": 3,
+        "candidates_per_shard": 4,
+        "payload_bytes": 12,
+        "relevant_fraction": 0.75,
+        "top_k": 3,
+    }
+    assert prompts[0]["max_tool_calls"] == 17
+    assert prompts[0]["timeout_seconds"] == 9.5
+
+
+def test_cli_direct_agent_alias_run_scores_successfully(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "direct-agent",
+            "--arms",
+            "direct_agent",
+            "--tool-shape",
+            "batch",
+            "--shards",
+            "2",
+            "--candidates-per-shard",
+            "3",
+            "--payload-bytes",
+            "8",
+            "--top-k",
+            "2",
+        ],
+    )
+
+    main()
+
+    row = json.loads((tmp_path / "direct-agent" / "results.jsonl").read_text())
+    assert row["arm_name"] == "direct_mcp_agent_parallel"
+    assert row["execution"]["error"] is None
+    assert row["score"]["schema_valid"] is True
+    assert row["score"]["top_k_overlap"] == 1.0
+    assert row["score"]["failure_reason"] is None
+
+
+def test_cli_invalid_arm_raises_before_writing_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "bad-arm",
+            "--arms",
+            "not-an-arm",
+        ],
+    )
+
+    with pytest.raises(ValueError, match="unknown executor id: not-an-arm"):
+        main()
+
+    assert not (tmp_path / "bad-arm").exists()
