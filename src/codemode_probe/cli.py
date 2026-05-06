@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from codemode_probe.artifacts import create_run_dir, write_run_artifacts
+from codemode_probe.cases import CaseMatrixConfig, generate_case_tasks
 from codemode_probe.executor_factory import available_executor_ids
 from codemode_probe.models import ProbeTask, TaskFamily, ToolShape
 from codemode_probe.suite import BenchmarkSuiteConfig, run_benchmark_suite
@@ -15,6 +16,12 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=Path("benchmarks/outputs"))
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--run-id", type=str, default=None)
+    parser.add_argument(
+        "--preset",
+        choices=["smoke", "orchestration_matrix"],
+        default=None,
+        help="Generate a named benchmark task preset instead of one manual task.",
+    )
     parser.add_argument(
         "--arms",
         default="deterministic_oracle_client",
@@ -35,7 +42,7 @@ def main() -> None:
     parser.add_argument("--random-seed", type=int, default=1)
     args = parser.parse_args()
 
-    task = _task_from_args(args)
+    tasks = _tasks_from_args(args)
     arms = [arm.strip() for arm in args.arms.split(",") if arm.strip()]
     suite_config = BenchmarkSuiteConfig(
         arms=tuple(arms),
@@ -43,11 +50,24 @@ def main() -> None:
         arm_order=args.arm_order,
         random_seed=args.random_seed,
     )
-    results = run_benchmark_suite([task], suite_config)
+    results = run_benchmark_suite(tasks, suite_config)
 
     run_dir = create_run_dir(args.out, run_id=args.run_id)
-    write_run_artifacts(run_dir, [task], results, suite_config=suite_config)
+    write_run_artifacts(run_dir, tasks, results, suite_config=suite_config)
     print(run_dir)
+
+
+def _tasks_from_args(args: argparse.Namespace) -> list[ProbeTask]:
+    if args.preset is not None:
+        return generate_case_tasks(
+            CaseMatrixConfig(
+                preset=args.preset,
+                base_seed=args.seed,
+                payload_bytes=args.payload_bytes,
+                relevant_fraction=args.relevant_fraction,
+            )
+        )
+    return [_task_from_args(args)]
 
 
 def _task_from_args(args: argparse.Namespace) -> ProbeTask:

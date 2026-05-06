@@ -50,6 +50,7 @@ def render_prompt(
 
 def _task_parameters(task: ProbeTask) -> dict[str, object]:
     return {
+        "seed": task.workload.seed,
         "task_family": task.workload.task_family.value,
         "tool_shape": task.workload.tool_shape.value,
         "shard_count": task.workload.shard_count,

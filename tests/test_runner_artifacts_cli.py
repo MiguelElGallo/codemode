@@ -270,6 +270,7 @@ def test_cli_workload_knobs_propagate_to_tasks_and_prompts_artifacts(
     assert tasks[0]["max_tool_calls"] == 17
     assert tasks[0]["timeout_seconds"] == 9.5
     assert prompts[0]["task_parameters"] == {
+        "seed": 99,
         "task_family": "batch_large_fanout",
         "tool_shape": "batch",
         "shard_count": 3,
@@ -280,6 +281,236 @@ def test_cli_workload_knobs_propagate_to_tasks_and_prompts_artifacts(
     }
     assert prompts[0]["max_tool_calls"] == 17
     assert prompts[0]["timeout_seconds"] == 9.5
+
+
+def test_cli_preset_smoke_writes_one_generated_task_and_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "preset-smoke",
+            "--preset",
+            "smoke",
+        ],
+    )
+
+    main()
+
+    run_dir = tmp_path / "preset-smoke"
+    assert capsys.readouterr().out.strip() == str(run_dir)
+
+    tasks = json.loads((run_dir / "tasks.resolved.json").read_text())
+    prompts = json.loads((run_dir / "prompts.resolved.json").read_text())
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "results.jsonl").read_text().splitlines()
+    ]
+
+    assert [task["id"] for task in tasks] == ["smoke_smoke_single_lookup"]
+    assert [prompt["task_id"] for prompt in prompts] == ["smoke_smoke_single_lookup"]
+    assert [row["task_id"] for row in rows] == ["smoke_smoke_single_lookup"]
+    assert prompts[0]["task_parameters"] == tasks[0]["workload"]
+
+
+def test_cli_preset_orchestration_matrix_writes_all_generated_tasks_and_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "preset-matrix",
+            "--preset",
+            "orchestration_matrix",
+            "--arms",
+            "deterministic_oracle_client,in_process",
+            "--repetitions",
+            "2",
+        ],
+    )
+
+    main()
+
+    run_dir = tmp_path / "preset-matrix"
+    tasks = json.loads((run_dir / "tasks.resolved.json").read_text())
+    prompts = json.loads((run_dir / "prompts.resolved.json").read_text())
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "results.jsonl").read_text().splitlines()
+    ]
+    expected_task_ids = [
+        "orchestration_matrix_single_lookup",
+        "orchestration_matrix_small_parallel_lookup",
+        "orchestration_matrix_scalar_large_fanout_25",
+        "orchestration_matrix_scalar_large_fanout_100",
+        "orchestration_matrix_batch_large_fanout_100",
+        "orchestration_matrix_deep_branching_filter_rank",
+    ]
+
+    assert [task["id"] for task in tasks] == expected_task_ids
+    assert [prompt["task_id"] for prompt in prompts] == expected_task_ids
+    assert len(rows) == len(expected_task_ids) * 2 * 2
+    assert {row["arm_name"] for row in rows} == {
+        "deterministic_oracle_client",
+        "in_process_tool_oracle",
+    }
+    assert {row["repetition"] for row in rows} == {1, 2}
+
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["task_count"] == len(expected_task_ids)
+    assert manifest["result_count"] == len(rows)
+
+
+def test_cli_preset_uses_seed_as_base_seed_and_payload_knobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "preset-seed-payload",
+            "--preset",
+            "orchestration_matrix",
+            "--seed",
+            "70",
+            "--payload-bytes",
+            "13",
+            "--relevant-fraction",
+            "0.6",
+        ],
+    )
+
+    main()
+
+    tasks = json.loads((tmp_path / "preset-seed-payload" / "tasks.resolved.json").read_text())
+
+    assert [
+        (task["id"], task["workload"]["seed"])
+        for task in tasks
+    ] == [
+        ("orchestration_matrix_single_lookup", 70 + len("single_lookup")),
+        (
+            "orchestration_matrix_small_parallel_lookup",
+            70 + len("small_parallel_lookup"),
+        ),
+        (
+            "orchestration_matrix_scalar_large_fanout_25",
+            70 + len("scalar_large_fanout_25"),
+        ),
+        (
+            "orchestration_matrix_scalar_large_fanout_100",
+            70 + len("scalar_large_fanout_100"),
+        ),
+        (
+            "orchestration_matrix_batch_large_fanout_100",
+            70 + len("batch_large_fanout_100"),
+        ),
+        (
+            "orchestration_matrix_deep_branching_filter_rank",
+            70 + len("deep_branching_filter_rank"),
+        ),
+    ]
+    assert {task["workload"]["payload_bytes"] for task in tasks} == {13}
+    assert {task["workload"]["relevant_fraction"] for task in tasks} == {0.6}
+
+
+def test_cli_manual_mode_still_uses_manual_task_family_knobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "manual-family",
+            "--task-id",
+            "manual-task",
+            "--task-family",
+            "single_lookup",
+            "--tool-shape",
+            "scalar",
+            "--shards",
+            "1",
+            "--candidates-per-shard",
+            "1",
+            "--top-k",
+            "1",
+        ],
+    )
+
+    main()
+
+    tasks = json.loads((tmp_path / "manual-family" / "tasks.resolved.json").read_text())
+
+    assert len(tasks) == 1
+    assert tasks[0]["id"] == "manual-task"
+    assert tasks[0]["workload"]["task_family"] == "single_lookup"
+    assert tasks[0]["workload"]["tool_shape"] == "scalar"
+    assert tasks[0]["workload"]["shard_count"] == 1
+    assert tasks[0]["workload"]["candidates_per_shard"] == 1
+    assert tasks[0]["workload"]["top_k"] == 1
+
+
+def test_cli_preset_ignores_manual_task_knobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "preset-ignores-manual",
+            "--preset",
+            "smoke",
+            "--task-id",
+            "manual-task-id",
+            "--task-family",
+            "batch_large_fanout",
+            "--tool-shape",
+            "batch",
+            "--shards",
+            "9",
+            "--candidates-per-shard",
+            "9",
+            "--top-k",
+            "9",
+            "--max-tool-calls",
+            "9",
+            "--timeout-seconds",
+            "9",
+        ],
+    )
+
+    main()
+
+    tasks = json.loads((tmp_path / "preset-ignores-manual" / "tasks.resolved.json").read_text())
+    prompts = json.loads((tmp_path / "preset-ignores-manual" / "prompts.resolved.json").read_text())
+
+    assert len(tasks) == 1
+    assert tasks[0]["id"] == "smoke_smoke_single_lookup"
+    assert tasks[0]["workload"]["task_family"] == "single_lookup"
+    assert tasks[0]["workload"]["tool_shape"] == "scalar"
+    assert tasks[0]["workload"]["shard_count"] == 1
+    assert tasks[0]["workload"]["candidates_per_shard"] == 1
+    assert tasks[0]["workload"]["top_k"] == 1
+    assert tasks[0]["max_tool_calls"] != 9
+    assert tasks[0]["timeout_seconds"] != 9
+    assert prompts[0]["task_id"] == "smoke_smoke_single_lookup"
 
 
 def test_cli_direct_agent_alias_run_scores_successfully(

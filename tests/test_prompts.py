@@ -34,6 +34,7 @@ def test_render_prompt_canonical_hash_is_deterministic_and_canonical() -> None:
         "task_id": task.id,
         "prompt": task.prompt,
         "task_parameters": {
+            "seed": task.workload.seed,
             "task_family": task.workload.task_family.value,
             "tool_shape": task.workload.tool_shape.value,
             "shard_count": task.workload.shard_count,

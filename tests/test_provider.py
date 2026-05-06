@@ -80,6 +80,7 @@ def test_provider_backed_model_client_sends_rendered_prompt_with_task_parameters
     assert isinstance(request.rendered_prompt, RenderedPrompt)
     assert request.rendered_prompt.task_id == task.id
     assert request.rendered_prompt.task_parameters == {
+        "seed": task.workload.seed,
         "task_family": task.workload.task_family.value,
         "tool_shape": task.workload.tool_shape.value,
         "shard_count": task.workload.shard_count,
