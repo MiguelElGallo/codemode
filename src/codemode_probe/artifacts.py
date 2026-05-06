@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import platform
+import re
 import sys
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -34,11 +35,27 @@ DEFAULT_PAIRED_BASELINE_ARM = "direct_mcp_agent_parallel"
 REDACTED_VALUE = "[REDACTED]"
 MAX_TRANSCRIPT_STRING_CHARS = 512
 MAX_TRANSCRIPT_COLLECTION_ITEMS = 50
+RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+SECRET_VALUE_PATTERNS = (
+    re.compile(r"\bBearer\s+\S+", re.IGNORECASE),
+    re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]*"),
+    re.compile(r"\bghp_[A-Za-z0-9_]+"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]+"),
+    re.compile(r"://[^/\s:@]+:[^/\s@]+@"),
+)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+BENCHMARK_PROTOCOL_DOC = REPO_ROOT / "docs" / "benchmark_protocol.md"
+EVIDENCE_REGISTER_DOC = REPO_ROOT / "docs" / "evidence_register.md"
 
 
 def create_run_dir(base_dir: Path, *, run_id: str | None = None) -> Path:
-    resolved_run_id = run_id or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = base_dir / resolved_run_id
+    resolved_run_id = run_id if run_id is not None else datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    _validate_run_id(resolved_run_id)
+    base_dir.mkdir(parents=True, exist_ok=True)
+    base = base_dir.resolve()
+    run_dir = base / resolved_run_id
+    if base not in (run_dir.resolve().parent, *run_dir.resolve().parents):
+        raise ValueError("run_id must resolve under the output directory")
     run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
 
@@ -60,6 +77,8 @@ def write_run_artifacts(
         "environment": _environment_metadata(),
         "source": git_source_metadata(),
         "protocol": benchmark_protocol_metadata(),
+        "documentation": _documentation_metadata(),
+        "claim_scope": _claim_scope(provider_config),
         "controls": _controls_metadata(suite_config),
     }
     paired_baseline_arm = DEFAULT_PAIRED_BASELINE_ARM
@@ -77,7 +96,7 @@ def write_run_artifacts(
         run_dir / "prompts.resolved.json",
         [render_prompt(task).model_dump(mode="json") for task in tasks],
     )
-    _write_jsonl(run_dir / "results.jsonl", results)
+    _write_jsonl_rows(run_dir / "results.jsonl", _result_rows(results))
     _write_jsonl_rows(run_dir / "transcripts.jsonl", _transcript_rows(results))
     _write_json(run_dir / "summary.json", summarize_results(results))
     paired_deltas = summarize_paired_deltas(results, baseline_arm=paired_baseline_arm)
@@ -154,6 +173,36 @@ def _environment_metadata() -> dict[str, object]:
     }
 
 
+def _documentation_metadata() -> dict[str, object]:
+    return {
+        "benchmark_protocol": _document_hash_metadata(BENCHMARK_PROTOCOL_DOC),
+        "evidence_register": _document_hash_metadata(EVIDENCE_REGISTER_DOC),
+    }
+
+
+def _document_hash_metadata(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {
+            "path": str(path.relative_to(REPO_ROOT)),
+            "sha256": None,
+            "bytes": None,
+        }
+    content = path.read_bytes()
+    return {
+        "path": str(path.relative_to(REPO_ROOT)),
+        "sha256": sha256(content).hexdigest(),
+        "bytes": len(content),
+    }
+
+
+def _claim_scope(provider_config: LiveProviderConfig | None) -> str:
+    if provider_config is None:
+        return "synthetic_harness_validation"
+    if provider_config.enabled:
+        return "live_provider_config_validated"
+    return "dry_run_provider_config"
+
+
 def _package_version(package_name: str) -> str | None:
     try:
         return metadata.version(package_name)
@@ -189,6 +238,13 @@ def _preflight_payload(
     }
 
 
+def _result_rows(results: list[ArmResult]) -> list[dict[str, object]]:
+    return [
+        _redact_for_safe_artifact(result.model_dump(mode="json"))
+        for result in results
+    ]
+
+
 def _transcript_rows(results: list[ArmResult]) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for result in results:
@@ -220,14 +276,14 @@ def _transcript_rows(results: list[ArmResult]) -> list[dict[str, object]]:
             "usage": result.execution.usage.model_dump(mode="json"),
             "trace": result.execution.trace.model_dump(mode="json"),
             "tool_calls": [
-                _redact_for_transcript(call.model_dump(mode="json"))
+                _redact_for_safe_artifact(call.model_dump(mode="json"))
                 for call in result.execution.tool_calls
             ],
-            "model_turns": _redact_for_transcript(
+            "model_turns": _redact_for_safe_artifact(
                 result.execution.raw.get("model_turns", [])
             ),
             "final_answer": (
-                _redact_for_transcript(result.execution.answer.model_dump(mode="json"))
+                _redact_for_safe_artifact(result.execution.answer.model_dump(mode="json"))
                 if result.execution.answer is not None
                 else None
             ),
@@ -241,7 +297,7 @@ def _transcript_rows(results: list[ArmResult]) -> list[dict[str, object]]:
     return rows
 
 
-def _redact_for_transcript(
+def _redact_for_safe_artifact(
     value: Any,
     *,
     depth: int = 0,
@@ -249,7 +305,7 @@ def _redact_for_transcript(
     if depth > 8:
         return {"truncated": True, "reason": "max_depth"}
     if isinstance(value, BaseModel):
-        return _redact_for_transcript(value.model_dump(mode="json"), depth=depth)
+        return _redact_for_safe_artifact(value.model_dump(mode="json"), depth=depth)
     if isinstance(value, dict):
         redacted: dict[str, object] = {}
         for index, (key, item) in enumerate(sorted(value.items(), key=lambda pair: str(pair[0]))):
@@ -260,11 +316,11 @@ def _redact_for_transcript(
             if _is_secret_key(key_text):
                 redacted[key_text] = REDACTED_VALUE
             else:
-                redacted[key_text] = _redact_for_transcript(item, depth=depth + 1)
+                redacted[key_text] = _redact_for_safe_artifact(item, depth=depth + 1)
         return redacted
     if isinstance(value, (list, tuple)):
         items = [
-            _redact_for_transcript(item, depth=depth + 1)
+            _redact_for_safe_artifact(item, depth=depth + 1)
             for item in value[:MAX_TRANSCRIPT_COLLECTION_ITEMS]
         ]
         if len(value) > MAX_TRANSCRIPT_COLLECTION_ITEMS:
@@ -273,6 +329,8 @@ def _redact_for_transcript(
             )
         return items
     if isinstance(value, str):
+        if _looks_like_secret_value(value):
+            return REDACTED_VALUE
         if len(value) <= MAX_TRANSCRIPT_STRING_CHARS:
             return value
         return {
@@ -286,18 +344,54 @@ def _redact_for_transcript(
 
 
 def _is_secret_key(key: str) -> bool:
-    normalized = key.lower().replace("-", "_")
-    secret_markers = (
+    normalized = re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+    compact = re.sub(r"[^a-z0-9]+", "", key.lower())
+    secret_keys = {
         "authorization",
+        "proxy_authorization",
         "api_key",
         "apikey",
         "access_token",
         "refresh_token",
+        "id_token",
         "password",
         "secret",
         "token",
+        "client_secret",
+        "private_key",
+    }
+    compact_secret_keys = {
+        "authorization",
+        "proxyauthorization",
+        "apikey",
+        "accesstoken",
+        "refreshtoken",
+        "idtoken",
+        "password",
+        "secret",
+        "token",
+        "clientsecret",
+        "privatekey",
+    }
+    return (
+        normalized in secret_keys
+        or normalized.endswith(
+            ("_api_key", "_apikey", "_password", "_secret", "_token")
+        )
+        or compact in compact_secret_keys
+        or compact.endswith(("apikey", "password", "secret", "token"))
     )
-    return any(marker in normalized for marker in secret_markers)
+
+
+def _validate_run_id(run_id: str) -> None:
+    if not run_id.strip():
+        raise ValueError("run_id must not be empty")
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        raise ValueError("run_id may only contain letters, numbers, dots, underscores, and dashes")
+
+
+def _looks_like_secret_value(value: str) -> bool:
+    return any(pattern.search(value) is not None for pattern in SECRET_VALUE_PATTERNS)
 
 
 def _canonical_hash(value: object) -> str:

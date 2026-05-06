@@ -29,6 +29,10 @@ from codemode_probe.runner import BenchmarkRunner
 from codemode_probe.suite import BenchmarkSuiteConfig
 from codemode_probe.workload import generate_candidates, make_probe_task
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+BENCHMARK_PROTOCOL = REPO_ROOT / "docs" / "benchmark_protocol.md"
+EVIDENCE_REGISTER = REPO_ROOT / "docs" / "evidence_register.md"
+
 
 def tiny_task(task_id: str = "task-1", *, seed: int = 11) -> ProbeTask:
     return make_probe_task(
@@ -205,6 +209,8 @@ def test_artifact_creation_writing_and_summary_jsonl_stability(tmp_path: Path) -
         "environment",
         "source",
         "protocol",
+        "documentation",
+        "claim_scope",
         "controls",
         "artifacts",
     }
@@ -212,6 +218,26 @@ def test_artifact_creation_writing_and_summary_jsonl_stability(tmp_path: Path) -
     assert manifest["task_count"] == 1
     assert manifest["result_count"] == 2
     assert isinstance(manifest["created_at"], str)
+    assert manifest["claim_scope"] == "synthetic_harness_validation"
+    assert set(manifest["documentation"]) == {"benchmark_protocol", "evidence_register"}
+    assert manifest["documentation"]["benchmark_protocol"]["path"] == (
+        "docs/benchmark_protocol.md"
+    )
+    assert manifest["documentation"]["benchmark_protocol"]["sha256"] == sha256(
+        BENCHMARK_PROTOCOL.read_bytes()
+    ).hexdigest()
+    assert manifest["documentation"]["benchmark_protocol"]["bytes"] == (
+        BENCHMARK_PROTOCOL.stat().st_size
+    )
+    assert manifest["documentation"]["evidence_register"]["path"] == (
+        "docs/evidence_register.md"
+    )
+    assert manifest["documentation"]["evidence_register"]["sha256"] == sha256(
+        EVIDENCE_REGISTER.read_bytes()
+    ).hexdigest()
+    assert manifest["documentation"]["evidence_register"]["bytes"] == (
+        EVIDENCE_REGISTER.stat().st_size
+    )
     assert manifest["controls"] == {
         "repetitions": None,
         "arm_order": "unspecified",
@@ -288,6 +314,24 @@ def test_artifact_creation_writing_and_summary_jsonl_stability(tmp_path: Path) -
     assert json.loads((run_dir / "summary.json").read_text()) == summarize_results(results)
 
 
+@pytest.mark.parametrize(
+    "bad_run_id",
+    [
+        "",
+        "   ",
+        "../escape",
+        "/tmp/escape",
+        "nested/run",
+        "nested\\run",
+    ],
+)
+def test_create_run_dir_rejects_unsafe_run_ids(tmp_path: Path, bad_run_id: str) -> None:
+    with pytest.raises(ValueError, match="run_id"):
+        create_run_dir(tmp_path, run_id=bad_run_id)
+
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_write_run_artifacts_manifest_includes_suite_config_when_provided(
     tmp_path: Path,
 ) -> None:
@@ -361,6 +405,7 @@ def test_write_run_artifacts_manifest_includes_provider_config_when_provided(
         "timeout_seconds": 12.5,
         "temperature": 0.2,
     }
+    assert manifest["claim_scope"] == "dry_run_provider_config"
 
 
 def test_write_run_artifacts_sources_git_metadata_from_process_context(
@@ -480,6 +525,34 @@ def test_cli_preflight_failure_raises_before_writing_artifacts(
     assert not (tmp_path / "failed-preflight").exists()
 
 
+def test_cli_existing_run_id_raises_before_running_benchmark(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    existing = tmp_path / "already-exists"
+    existing.mkdir()
+
+    def fail_if_called(tasks: list[ProbeTask], config: object) -> list[object]:
+        raise AssertionError("benchmark should not run when run directory already exists")
+
+    monkeypatch.setattr("codemode_probe.cli.run_benchmark_suite", fail_if_called)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "already-exists",
+            "--skip-preflight",
+        ],
+    )
+
+    with pytest.raises(FileExistsError):
+        main()
+
+    assert list(existing.iterdir()) == []
+
+
 def test_cli_provider_dry_run_records_config_without_sdk_or_env_checks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -523,6 +596,7 @@ def test_cli_provider_dry_run_records_config_without_sdk_or_env_checks(
         "timeout_seconds": 9.5,
         "temperature": 0.1,
     }
+    assert manifest["claim_scope"] == "dry_run_provider_config"
 
 
 def test_cli_provider_without_dry_run_requires_explicit_live_enable_before_artifacts(

@@ -1,8 +1,7 @@
 # Code Mode Probe
 
-This repository contains a benchmark harness for probing when code-driven
-orchestration over MCP becomes cheaper or faster than direct model-driven MCP
-tool use.
+This repository contains a benchmark harness for probing orchestration cost,
+latency, quality, and payload visibility under synthetic MCP-shaped workloads.
 
 The implementation starts with a deterministic synthetic workload and oracle.
 MCP and Code Mode adapters are intentionally layered on top of those contracts
@@ -22,18 +21,24 @@ Implemented:
 - smoke and orchestration-matrix presets
 - JSONL artifacts, aggregate summaries, paired deltas, workload regimes, and Markdown reports
 - run environment/control metadata, configurable paired baseline, trial provenance, and typed failure categories
+- cache cohort labels and paired bootstrap uncertainty artifacts
 - optional provider and Code Mode runtime dependency boundaries
+- a benchmark protocol document and evidence register for future live claims
 
 Not yet implemented:
 
 - real provider SDK adapter
 - real Pydantic Code Mode/Monty execution arm
-- cold/warm cache cohort instrumentation
-- confidence intervals or bootstrap statistics
+- provider-enforced cold/warm cache behavior
+- documented minimum sample-size protocol for publishable live-model claims
 
 Until those pieces exist, results should be interpreted as deterministic
 orchestration harness validation, not as a claim that Code Mode beats direct
 MCP with live models.
+
+See [docs/benchmark_protocol.md](docs/benchmark_protocol.md) for the formal
+benchmark protocol and [docs/evidence_register.md](docs/evidence_register.md)
+for the source register required before external cost/performance claims.
 
 ## Setup
 
@@ -49,8 +54,9 @@ uv sync --extra providers
 uv sync --extra code-mode
 ```
 
-The package requires Python 3.11 or newer. The CI workflow currently runs the
-test suite on Python 3.13.
+The package requires Python 3.11 or newer. The CI workflow runs the test suite
+on Python 3.11, 3.12, and 3.13, then builds the package and checks optional
+provider and Code Mode extras.
 
 ## Run A Smoke Benchmark
 
@@ -106,10 +112,10 @@ activity. `summary.json`, `paired_deltas.json`, `pairing_coverage.json`,
 from the run results. `report.md` is presentation-only.
 
 `manifest.json` records the normalized arms, selected paired-delta baseline,
-arm-order seed, retry/concurrency/cache policy labels, Python/platform metadata,
-git source metadata, benchmark protocol version/module hashes, optional
-integration package versions when installed, and SHA-256 checksums for the
-emitted artifact files.
+arm-order seed, retry/concurrency/cache policy labels, claim scope,
+Python/platform metadata, git source metadata, benchmark protocol version/module
+hashes, protocol/evidence document hashes, optional integration package
+versions when installed, and SHA-256 checksums for the emitted artifact files.
 
 Optional provider settings can be recorded without credentials by passing
 `--provider`, `--provider-model`, and `--provider-dry-run`. Without
@@ -137,3 +143,11 @@ real provider-side cache behavior.
 `pairing_coverage.json` records how many trial groups had the configured
 paired-delta baseline, how many comparison results were paired, and how many
 were skipped because a baseline row was missing.
+
+## Claims Not Supported Yet
+
+This benchmark does not yet support claims about live model quality, live
+provider cost, production MCP workloads, provider cache behavior, or general
+Code Mode superiority. Those claims require real provider adapters, a real Code
+Mode/Monty arm, filled source-register entries, and a predeclared sample-size
+and analysis protocol.

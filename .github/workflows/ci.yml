@@ -9,6 +9,27 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run tests
+        run: uv run --extra dev pytest -q
+
+  package:
+    runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -21,5 +42,17 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Run tests
-        run: uv run --extra dev pytest -q
+      - name: Build package
+        run: uv build
+
+      - name: Install built wheel
+        run: |
+          python -m venv /tmp/codemode-wheel
+          /tmp/codemode-wheel/bin/python -m pip install dist/*.whl
+          /tmp/codemode-wheel/bin/python -c "import codemode_probe"
+
+      - name: Check provider extras
+        run: uv run --extra providers pytest -q tests/test_provider_config.py tests/test_provider.py
+
+      - name: Check Code Mode extras
+        run: uv run --extra code-mode pytest -q tests/test_code_mode_config.py tests/test_code_mode_adapter.py

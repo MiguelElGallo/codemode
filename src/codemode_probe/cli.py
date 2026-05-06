@@ -130,9 +130,10 @@ def main() -> None:
         cache_namespace=args.cache_namespace,
         cache_warmup_repetitions=args.cache_warmup_repetitions,
     )
+    suite_config.validate_arms()
+    run_dir = create_run_dir(args.out, run_id=args.run_id)
     results = run_benchmark_suite(tasks, suite_config)
 
-    run_dir = create_run_dir(args.out, run_id=args.run_id)
     write_run_artifacts(
         run_dir,
         tasks,

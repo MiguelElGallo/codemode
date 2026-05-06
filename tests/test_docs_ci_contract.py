@@ -15,6 +15,8 @@ from codemode_probe.workload import make_probe_task
 REPO_ROOT = Path(__file__).resolve().parents[1]
 README = REPO_ROOT / "README.md"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+BENCHMARK_PROTOCOL = REPO_ROOT / "docs" / "benchmark_protocol.md"
+EVIDENCE_REGISTER = REPO_ROOT / "docs" / "evidence_register.md"
 
 
 def _readme_fenced_blocks(language: str) -> list[str]:
@@ -150,6 +152,32 @@ def test_readme_artifact_layout_matches_writer_outputs(tmp_path: Path) -> None:
     }
 
 
+def test_readme_links_protocol_and_evidence_register() -> None:
+    readme = README.read_text(encoding="utf-8")
+
+    assert "[docs/benchmark_protocol.md](docs/benchmark_protocol.md)" in readme
+    assert "[docs/evidence_register.md](docs/evidence_register.md)" in readme
+    assert BENCHMARK_PROTOCOL.is_file()
+    assert EVIDENCE_REGISTER.is_file()
+
+
+def test_protocol_doc_declares_current_claim_boundaries() -> None:
+    protocol = BENCHMARK_PROTOCOL.read_text(encoding="utf-8")
+
+    assert "synthetic harness" in protocol
+    assert "not a real Pydantic Code Mode/Monty runtime" in protocol
+    assert "do not support claims about live model quality" in protocol
+    assert "(task_id, repetition, trial_id)" in protocol
+
+
+def test_evidence_register_has_required_columns() -> None:
+    evidence = EVIDENCE_REGISTER.read_text(encoding="utf-8")
+
+    assert "| Claim | Source URL | Retrieved At | Version/Date | Used By | Notes |" in evidence
+    assert "Provider pricing" in evidence
+    assert "Code Mode/Monty docs" in evidence
+
+
 def test_readme_setup_command_matches_ci_test_command() -> None:
     setup_block = next(
         block for block in _readme_fenced_blocks("bash") if "pytest -q" in block
@@ -159,6 +187,9 @@ def test_readme_setup_command_matches_ci_test_command() -> None:
 
     assert "uv sync --extra dev" in readme_commands
     assert "uv run --extra dev pytest -q" in readme_commands
-    assert re.search(r'python-version:\s*"3\.13"', ci_text)
+    assert 'python-version: ["3.11", "3.12", "3.13"]' in ci_text
     assert re.search(r"run:\s*uv run --extra dev pytest -q", ci_text)
-    assert "Python 3.13" in README.read_text(encoding="utf-8")
+    assert "Python 3.11, 3.12, and 3.13" in README.read_text(encoding="utf-8")
+    assert "uv build" in ci_text
+    assert "uv run --extra providers pytest -q" in ci_text
+    assert "uv run --extra code-mode pytest -q" in ci_text

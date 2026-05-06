@@ -1155,14 +1155,29 @@ def test_write_run_artifacts_writes_redacted_bounded_transcripts(tmp_path: Path)
             cache_state=CacheState.WARMUP,
             cache_namespace="cache-a",
             cache_warmup_run=True,
+            usage=UsageStats(
+                input_tokens=11,
+                output_tokens=7,
+                cache_read_tokens=5,
+                cache_write_tokens=3,
+            ),
             raw={
                 "model_turns": [
                     {
                         "provider_name": "fake",
                         "Authorization": "Bearer live-secret",
                         "provider_raw": {
+                            "accessToken": "camel-access-secret",
                             "api_key": "sk-test-secret",
+                            "inputTokens": 11,
+                            "session_token": "plain-session-secret",
+                            "sessionToken": "camel-session-secret",
                             "payload": "x" * 600,
+                            "notes": [
+                                "Bearer leaked-token",
+                                "https://user:pass@example.test/path",
+                            ],
+                            "token_count": 123,
                         },
                     }
                 ]
@@ -1187,11 +1202,57 @@ def test_write_run_artifacts_writes_redacted_bounded_transcripts(tmp_path: Path)
     assert isinstance(row["transcript_hash"], str)
     turn = row["model_turns"][0]
     assert turn["Authorization"] == "[REDACTED]"
+    assert turn["provider_raw"]["accessToken"] == "[REDACTED]"
     assert turn["provider_raw"]["api_key"] == "[REDACTED]"
+    assert turn["provider_raw"]["inputTokens"] == 11
+    assert turn["provider_raw"]["session_token"] == "[REDACTED]"
+    assert turn["provider_raw"]["sessionToken"] == "[REDACTED]"
     assert turn["provider_raw"]["payload"]["truncated"] is True
     assert turn["provider_raw"]["payload"]["original_chars"] == 600
-    assert "live-secret" not in (tmp_path / "transcripts.jsonl").read_text(encoding="utf-8")
-    assert "sk-test-secret" not in (tmp_path / "transcripts.jsonl").read_text(encoding="utf-8")
+    assert turn["provider_raw"]["notes"] == ["[REDACTED]", "[REDACTED]"]
+    assert turn["provider_raw"]["token_count"] == 123
+
+    results_rows = [
+        json.loads(line)
+        for line in (tmp_path / "results.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    result_turn = results_rows[0]["execution"]["raw"]["model_turns"][0]
+    assert result_turn["Authorization"] == "[REDACTED]"
+    assert result_turn["provider_raw"]["accessToken"] == "[REDACTED]"
+    assert result_turn["provider_raw"]["api_key"] == "[REDACTED]"
+    assert result_turn["provider_raw"]["inputTokens"] == 11
+    assert result_turn["provider_raw"]["session_token"] == "[REDACTED]"
+    assert result_turn["provider_raw"]["sessionToken"] == "[REDACTED]"
+    assert result_turn["provider_raw"]["payload"]["truncated"] is True
+    assert result_turn["provider_raw"]["notes"] == ["[REDACTED]", "[REDACTED]"]
+    assert result_turn["provider_raw"]["token_count"] == 123
+    assert results_rows[0]["execution"]["usage"] == {
+        "cache_read_tokens": 5,
+        "cache_write_tokens": 3,
+        "failed_tool_calls": 0,
+        "input_tokens": 11,
+        "model_requests": 0,
+        "model_visible_bytes_total": None,
+        "output_tokens": 7,
+        "tool_calls": 0,
+        "tool_response_bytes_total": 0,
+    }
+
+    all_artifact_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in tmp_path.iterdir()
+        if path.is_file()
+    )
+    for forbidden in (
+        "live-secret",
+        "sk-test-secret",
+        "camel-access-secret",
+        "plain-session-secret",
+        "camel-session-secret",
+        "leaked-token",
+        "user:pass",
+    ):
+        assert forbidden not in all_artifact_text
 
 
 def test_write_run_artifacts_keeps_existing_summary_results_and_report_artifacts(
