@@ -4,9 +4,9 @@ import argparse
 from pathlib import Path
 
 from codemode_probe.artifacts import create_run_dir, write_run_artifacts
-from codemode_probe.executor_factory import available_executor_ids, build_executor
+from codemode_probe.executor_factory import available_executor_ids
 from codemode_probe.models import ProbeTask, TaskFamily, ToolShape
-from codemode_probe.runner import BenchmarkRunner
+from codemode_probe.suite import BenchmarkSuiteConfig, run_benchmark_suite
 from codemode_probe.workload import make_probe_task
 
 
@@ -31,18 +31,22 @@ def main() -> None:
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--max-tool-calls", type=int, default=200)
     parser.add_argument("--timeout-seconds", type=float, default=60.0)
+    parser.add_argument("--arm-order", choices=["fixed", "randomized"], default="fixed")
+    parser.add_argument("--random-seed", type=int, default=1)
     args = parser.parse_args()
 
     task = _task_from_args(args)
     arms = [arm.strip() for arm in args.arms.split(",") if arm.strip()]
-    results = []
-    for repetition in range(1, args.repetitions + 1):
-        for arm in arms:
-            executor = build_executor(arm, task)
-            results.append(BenchmarkRunner(executor).run_task(task, repetition=repetition))
+    suite_config = BenchmarkSuiteConfig(
+        arms=tuple(arms),
+        repetitions=args.repetitions,
+        arm_order=args.arm_order,
+        random_seed=args.random_seed,
+    )
+    results = run_benchmark_suite([task], suite_config)
 
     run_dir = create_run_dir(args.out, run_id=args.run_id)
-    write_run_artifacts(run_dir, [task], results)
+    write_run_artifacts(run_dir, [task], results, suite_config=suite_config)
     print(run_dir)
 
 

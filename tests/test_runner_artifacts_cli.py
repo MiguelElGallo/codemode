@@ -12,6 +12,7 @@ from codemode_probe.models import ExecutionResult, ProbeTask, UsageStats
 from codemode_probe.prompts import render_prompt
 from codemode_probe.oracle import rank_candidates
 from codemode_probe.runner import BenchmarkRunner
+from codemode_probe.suite import BenchmarkSuiteConfig
 from codemode_probe.workload import generate_candidates, make_probe_task
 
 
@@ -96,6 +97,7 @@ def test_artifact_creation_writing_and_summary_jsonl_stability(tmp_path: Path) -
     assert {row["arm_name"] for row in result_rows} == {"deterministic_oracle_client"}
 
     manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert set(manifest) == {"schema_version", "created_at", "task_count", "result_count"}
     assert manifest["schema_version"] == 1
     assert manifest["task_count"] == 1
     assert manifest["result_count"] == 2
@@ -108,6 +110,34 @@ def test_artifact_creation_writing_and_summary_jsonl_stability(tmp_path: Path) -
     assert resolved_prompts[0]["task_id"] == task.id
     assert isinstance(resolved_prompts[0]["canonical_hash"], str)
     assert json.loads((run_dir / "summary.json").read_text()) == summarize_results(results)
+
+
+def test_write_run_artifacts_manifest_includes_suite_config_when_provided(
+    tmp_path: Path,
+) -> None:
+    task = tiny_task()
+    results = BenchmarkRunner(DeterministicOracleExecutor()).run([task])
+    suite_config = BenchmarkSuiteConfig(
+        arms=("direct_agent", "in_process"),
+        repetitions=3,
+        arm_order="randomized",
+        random_seed=42,
+    )
+
+    run_dir = create_run_dir(tmp_path, run_id="suite-manifest")
+    write_run_artifacts(run_dir, [task], results, suite_config=suite_config)
+
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["suite"] == {
+        "arms": ["direct_agent", "in_process"],
+        "repetitions": 3,
+        "arm_order": "randomized",
+        "random_seed": 42,
+        "normalized_arms": [
+            "direct_mcp_agent_parallel",
+            "in_process_tool_oracle",
+        ],
+    }
 
 
 def test_cli_writes_artifacts_without_timestamp_assertions(
@@ -308,3 +338,63 @@ def test_cli_invalid_arm_raises_before_writing_artifacts(
         main()
 
     assert not (tmp_path / "bad-arm").exists()
+
+
+def test_cli_delegates_arm_order_and_random_seed_to_suite_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = {}
+
+    def fake_run_benchmark_suite(tasks: list[ProbeTask], config: object) -> list[object]:
+        captured["task_ids"] = [task.id for task in tasks]
+        captured["arms"] = config.arms
+        captured["repetitions"] = config.repetitions
+        captured["arm_order"] = config.arm_order
+        captured["random_seed"] = config.random_seed
+        return []
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "delegated-order",
+            "--task-id",
+            "delegation-task",
+            "--arms",
+            "direct_agent,in_process",
+            "--repetitions",
+            "3",
+            "--arm-order",
+            "randomized",
+            "--random-seed",
+            "42",
+        ],
+    )
+    monkeypatch.setattr(
+        "codemode_probe.cli.run_benchmark_suite",
+        fake_run_benchmark_suite,
+    )
+
+    main()
+
+    manifest = json.loads((tmp_path / "delegated-order" / "manifest.json").read_text())
+    assert captured == {
+        "task_ids": ["delegation-task"],
+        "arms": ("direct_agent", "in_process"),
+        "repetitions": 3,
+        "arm_order": "randomized",
+        "random_seed": 42,
+    }
+    assert manifest["suite"] == {
+        "arms": ["direct_agent", "in_process"],
+        "repetitions": 3,
+        "arm_order": "randomized",
+        "random_seed": 42,
+        "normalized_arms": [
+            "direct_mcp_agent_parallel",
+            "in_process_tool_oracle",
+        ],
+    }

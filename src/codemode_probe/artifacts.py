@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from codemode_probe.models import ArmResult, ProbeTask
 from codemode_probe.prompts import render_prompt
+from codemode_probe.suite import BenchmarkSuiteConfig
 
 SCHEMA_VERSION = 1
 
@@ -19,15 +20,25 @@ def create_run_dir(base_dir: Path, *, run_id: str | None = None) -> Path:
     return run_dir
 
 
-def write_run_artifacts(run_dir: Path, tasks: list[ProbeTask], results: list[ArmResult]) -> None:
+def write_run_artifacts(
+    run_dir: Path,
+    tasks: list[ProbeTask],
+    results: list[ArmResult],
+    *,
+    suite_config: BenchmarkSuiteConfig | None = None,
+) -> None:
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "created_at": datetime.now(UTC).isoformat(),
+        "task_count": len(tasks),
+        "result_count": len(results),
+    }
+    if suite_config is not None:
+        manifest["suite"] = suite_config.model_dump(mode="json")
+        manifest["suite"]["normalized_arms"] = list(suite_config.normalized_arms)
     _write_json(
         run_dir / "manifest.json",
-        {
-            "schema_version": SCHEMA_VERSION,
-            "created_at": datetime.now(UTC).isoformat(),
-            "task_count": len(tasks),
-            "result_count": len(results),
-        },
+        manifest,
     )
     _write_json(run_dir / "tasks.resolved.json", [task.model_dump(mode="json") for task in tasks])
     _write_json(
