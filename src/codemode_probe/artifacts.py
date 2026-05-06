@@ -4,6 +4,7 @@ import json
 import platform
 import sys
 from datetime import UTC, datetime
+from hashlib import sha256
 from importlib import metadata
 from pathlib import Path
 
@@ -11,8 +12,10 @@ from pydantic import BaseModel
 
 from codemode_probe.models import ArmResult, ProbeTask
 from codemode_probe.prompts import render_prompt
+from codemode_probe.provenance import benchmark_protocol_metadata, git_source_metadata
 from codemode_probe.reporting import (
     render_summary_markdown,
+    summarize_pairing_coverage,
     summarize_paired_delta_groups,
     summarize_paired_deltas,
     summarize_results,
@@ -44,6 +47,8 @@ def write_run_artifacts(
         "task_count": len(tasks),
         "result_count": len(results),
         "environment": _environment_metadata(),
+        "source": git_source_metadata(),
+        "protocol": benchmark_protocol_metadata(),
         "controls": _controls_metadata(suite_config),
     }
     paired_baseline_arm = DEFAULT_PAIRED_BASELINE_ARM
@@ -54,10 +59,6 @@ def write_run_artifacts(
             suite_config.normalized_paired_baseline_arm
         )
         paired_baseline_arm = suite_config.normalized_paired_baseline_arm
-    _write_json(
-        run_dir / "manifest.json",
-        manifest,
-    )
     _write_json(run_dir / "tasks.resolved.json", [task.model_dump(mode="json") for task in tasks])
     _write_json(
         run_dir / "prompts.resolved.json",
@@ -70,11 +71,20 @@ def write_run_artifacts(
         run_dir / "paired_deltas.json",
         paired_deltas,
     )
+    _write_json(
+        run_dir / "pairing_coverage.json",
+        summarize_pairing_coverage(results, baseline_arm=paired_baseline_arm),
+    )
     _write_json(run_dir / "paired_delta_summary.json", summarize_paired_delta_groups(paired_deltas))
     _write_json(run_dir / "workload_regimes.json", summarize_workload_regimes(tasks, results))
     (run_dir / "report.md").write_text(
         render_summary_markdown(results, paired_baseline_arm=paired_baseline_arm),
         encoding="utf-8",
+    )
+    manifest["artifacts"] = _artifact_hashes(run_dir)
+    _write_json(
+        run_dir / "manifest.json",
+        manifest,
     )
 
 
@@ -127,6 +137,17 @@ def _package_version(package_name: str) -> str | None:
         return metadata.version(package_name)
     except metadata.PackageNotFoundError:
         return None
+
+
+def _artifact_hashes(run_dir: Path) -> dict[str, dict[str, object]]:
+    return {
+        path.name: {
+            "sha256": sha256(path.read_bytes()).hexdigest(),
+            "bytes": path.stat().st_size,
+        }
+        for path in sorted(run_dir.iterdir())
+        if path.is_file() and path.name != "manifest.json"
+    }
 
 
 def _write_json(path: Path, data: object) -> None:

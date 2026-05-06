@@ -14,6 +14,7 @@ from codemode_probe.models import (
 )
 from codemode_probe.reporting import (
     render_summary_markdown,
+    summarize_pairing_coverage,
     summarize_paired_delta_groups,
     summarize_paired_deltas,
     summarize_results,
@@ -306,6 +307,38 @@ def test_summarize_paired_deltas_returns_none_latency_ratio_for_zero_baseline() 
     )
 
     assert rows[0]["latency_ratio"] is None
+
+
+def test_summarize_pairing_coverage_counts_missing_baselines_and_duplicates() -> None:
+    coverage = summarize_pairing_coverage(
+        [
+            _result("baseline", task_id="task-a", trial_id="task-a:rep-1"),
+            _result("comparison", task_id="task-a", trial_id="task-a:rep-1"),
+            _result("comparison", task_id="task-b", trial_id="task-b:rep-1"),
+            _result("comparison", task_id="task-b", trial_id="task-b:rep-1"),
+            _result("baseline", task_id="task-c", trial_id="task-c:rep-1"),
+        ],
+        baseline_arm="baseline",
+    )
+
+    assert coverage == {
+        "baseline_arm": "baseline",
+        "trial_count": 3,
+        "trials_with_baseline": 2,
+        "trials_missing_baseline": 1,
+        "comparison_results_total": 3,
+        "paired_comparisons_total": 1,
+        "unpaired_comparisons_total": 2,
+        "duplicate_trial_arm_groups": 1,
+        "missing_baseline_trial_keys": [
+            {
+                "task_id": "task-b",
+                "repetition": 1,
+                "trial_id": "task-b:rep-1",
+                "comparison_results": 2,
+            }
+        ],
+    }
 
 
 def test_summarize_paired_deltas_preserves_trial_provenance_and_keeps_trials_separate() -> None:
@@ -663,6 +696,9 @@ def test_write_run_artifacts_writes_paired_deltas_with_direct_mcp_parallel_basel
     paired_summary = json.loads(
         (tmp_path / "paired_delta_summary.json").read_text(encoding="utf-8")
     )
+    pairing_coverage = json.loads(
+        (tmp_path / "pairing_coverage.json").read_text(encoding="utf-8")
+    )
     assert paired_deltas == [
         {
             "task_id": "task-1",
@@ -700,6 +736,24 @@ def test_write_run_artifacts_writes_paired_deltas_with_direct_mcp_parallel_basel
             "mean_delta_model_visible_bytes": 0.0,
         }
     ]
+    assert pairing_coverage == {
+        "baseline_arm": "direct_mcp_agent_parallel",
+        "trial_count": 2,
+        "trials_with_baseline": 1,
+        "trials_missing_baseline": 1,
+        "comparison_results_total": 2,
+        "paired_comparisons_total": 1,
+        "unpaired_comparisons_total": 1,
+        "duplicate_trial_arm_groups": 0,
+        "missing_baseline_trial_keys": [
+            {
+                "task_id": "task-2",
+                "repetition": 1,
+                "trial_id": None,
+                "comparison_results": 1,
+            }
+        ],
+    }
 
 
 def test_write_run_artifacts_uses_suite_paired_baseline_for_deltas_and_report(

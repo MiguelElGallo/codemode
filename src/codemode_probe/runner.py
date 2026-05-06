@@ -5,6 +5,7 @@ from time import perf_counter
 from codemode_probe.executors import CandidateExecutor
 from codemode_probe.models import ArmResult, ProbeTask
 from codemode_probe.oracle import rank_candidates
+from codemode_probe.provenance import build_result_provenance
 from codemode_probe.scoring import score_answer
 from codemode_probe.workload import generate_candidates
 
@@ -18,9 +19,10 @@ class BenchmarkRunner:
         execution = self.executor.execute(task)
         latency_ms = (perf_counter() - started) * 1000
 
+        candidates = generate_candidates(task.workload)
         oracle = rank_candidates(
             task.id,
-            generate_candidates(task.workload),
+            candidates,
             task.workload.top_k,
         )
         score = score_answer(
@@ -33,6 +35,13 @@ class BenchmarkRunner:
             arm_name=self.executor.name,
             repetition=repetition,
             latency_ms=round(latency_ms, 3),
+            provenance=build_result_provenance(
+                task,
+                executor_name=self.executor.name,
+                executor_config=_executor_config(self.executor),
+                candidates=candidates,
+                oracle_answer=oracle,
+            ),
             execution=execution,
             score=score,
         )
@@ -43,3 +52,13 @@ class BenchmarkRunner:
             for task in tasks:
                 results.append(self.run_task(task, repetition=repetition))
         return results
+
+
+def _executor_config(executor: CandidateExecutor) -> dict[str, object]:
+    config_metadata = getattr(executor, "config_metadata", None)
+    if config_metadata is None:
+        return {}
+    config = config_metadata() if callable(config_metadata) else config_metadata
+    if not isinstance(config, dict):
+        return {"value": config}
+    return config

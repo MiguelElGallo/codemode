@@ -87,18 +87,21 @@ prompts.resolved.json
 results.jsonl
 summary.json
 paired_deltas.json
+pairing_coverage.json
 paired_delta_summary.json
 workload_regimes.json
 report.md
 ```
 
 `results.jsonl` is the canonical machine-readable record. `summary.json`,
-`paired_deltas.json`, `paired_delta_summary.json`, and `workload_regimes.json`
-are derived from it. `report.md` is presentation-only.
+`paired_deltas.json`, `pairing_coverage.json`, `paired_delta_summary.json`, and
+`workload_regimes.json` are derived from it. `report.md` is presentation-only.
 
 `manifest.json` records the normalized arms, selected paired-delta baseline,
 arm-order seed, retry/concurrency/cache policy labels, Python/platform metadata,
-and optional integration package versions when installed.
+git source metadata, benchmark protocol version/module hashes, optional
+integration package versions when installed, and SHA-256 checksums for the
+emitted artifact files.
 
 ## Interpreting Results
 
@@ -116,3 +119,7 @@ Payload suppression is:
 
 Cold/warm cache state is not instrumented yet. Repetitions are repeated
 measurements, not cache-warm trials.
+
+`pairing_coverage.json` records how many trial groups had the configured
+paired-delta baseline, how many comparison results were paired, and how many
+were skipped because a baseline row was missing.

@@ -202,6 +202,20 @@ class ExecutionResult(BaseModel):
     error: str | None = None
 
 
+class ResultProvenance(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    schema_version: int = 1
+    task_hash: str | None = None
+    prompt_hash: str | None = None
+    tool_spec_hash: str | None = None
+    candidate_set_hash: str | None = None
+    oracle_answer_hash: str | None = None
+    executor_name: str | None = None
+    executor_config: dict[str, Any] = Field(default_factory=dict)
+    benchmark_version: str | None = None
+
+
 class ArmResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -213,5 +227,6 @@ class ArmResult(BaseModel):
     arm_order: tuple[str, ...] = Field(default_factory=tuple)
     latency_ms: float = Field(ge=0.0)
     timed_out: bool = False
+    provenance: ResultProvenance = Field(default_factory=ResultProvenance)
     execution: ExecutionResult
     score: ScoreResult

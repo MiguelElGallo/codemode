@@ -90,6 +90,62 @@ def summarize_paired_deltas(
     return rows
 
 
+def summarize_pairing_coverage(
+    results: list[ArmResult],
+    *,
+    baseline_arm: str,
+) -> dict[str, object]:
+    by_key: dict[tuple[str, int, str | None], dict[str, list[ArmResult]]] = {}
+    for result in results:
+        by_key.setdefault(
+            (result.task_id, result.repetition, result.trial_id),
+            {},
+        ).setdefault(result.arm_name, []).append(result)
+
+    trials_missing_baseline = 0
+    comparison_results_total = 0
+    paired_comparisons_total = 0
+    duplicate_trial_arm_groups = 0
+    missing_baseline_trial_keys: list[dict[str, object]] = []
+
+    for task_id, repetition, trial_id in sorted(
+        by_key,
+        key=lambda key: (key[0], key[1], key[2] or ""),
+    ):
+        arm_results = by_key[(task_id, repetition, trial_id)]
+        baseline_count = len(arm_results.get(baseline_arm, []))
+        comparison_count = sum(
+            len(rows) for arm_name, rows in arm_results.items() if arm_name != baseline_arm
+        )
+        comparison_results_total += comparison_count
+        if baseline_count == 0:
+            trials_missing_baseline += 1
+            missing_baseline_trial_keys.append(
+                {
+                    "task_id": task_id,
+                    "repetition": repetition,
+                    "trial_id": trial_id,
+                    "comparison_results": comparison_count,
+                }
+            )
+        else:
+            paired_comparisons_total += comparison_count
+
+        duplicate_trial_arm_groups += sum(1 for rows in arm_results.values() if len(rows) > 1)
+
+    return {
+        "baseline_arm": baseline_arm,
+        "trial_count": len(by_key),
+        "trials_with_baseline": len(by_key) - trials_missing_baseline,
+        "trials_missing_baseline": trials_missing_baseline,
+        "comparison_results_total": comparison_results_total,
+        "paired_comparisons_total": paired_comparisons_total,
+        "unpaired_comparisons_total": comparison_results_total - paired_comparisons_total,
+        "duplicate_trial_arm_groups": duplicate_trial_arm_groups,
+        "missing_baseline_trial_keys": missing_baseline_trial_keys,
+    }
+
+
 def summarize_paired_delta_groups(
     paired_deltas: list[dict[str, object]],
 ) -> list[dict[str, object]]:

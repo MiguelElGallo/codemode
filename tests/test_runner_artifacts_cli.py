@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from codemode_probe.cli import main
 from codemode_probe.executors import DeterministicOracleExecutor
 from codemode_probe.models import ExecutionResult, ProbeTask, UsageStats
 from codemode_probe.prompts import render_prompt
+from codemode_probe.provenance import hash_candidate_set, hash_oracle_answer
 from codemode_probe.oracle import rank_candidates
 from codemode_probe.runner import BenchmarkRunner
 from codemode_probe.suite import BenchmarkSuiteConfig
@@ -47,6 +49,7 @@ def test_deterministic_oracle_executor_returns_oracle_answer_and_usage_contract(
 def test_benchmark_runner_repetitions_and_result_contract() -> None:
     class OracleExecutor:
         name = "contract_executor"
+        config_metadata = {"mode": "unit-test"}
 
         def execute(self, task: ProbeTask) -> ExecutionResult:
             return ExecutionResult(
@@ -74,6 +77,21 @@ def test_benchmark_runner_repetitions_and_result_contract() -> None:
     assert all(result.score.schema_valid is True for result in results)
     assert all(result.score.top_k_overlap == 1.0 for result in results)
     assert all(result.score.failure_reason is None for result in results)
+    assert all(result.provenance.executor_name == "contract_executor" for result in results)
+    assert all(result.provenance.executor_config == {"mode": "unit-test"} for result in results)
+    assert all(result.provenance.prompt_hash == render_prompt(tiny_task(result.task_id, seed=1 if result.task_id == "task-a" else 2)).canonical_hash for result in results)
+    assert all(
+        result.provenance.candidate_set_hash
+        == hash_candidate_set(
+            generate_candidates(
+                tiny_task(
+                    result.task_id,
+                    seed=1 if result.task_id == "task-a" else 2,
+                ).workload
+            )
+        )
+        for result in results
+    )
 
 
 def test_artifact_creation_writing_and_summary_jsonl_stability(tmp_path: Path) -> None:
@@ -98,6 +116,15 @@ def test_artifact_creation_writing_and_summary_jsonl_stability(tmp_path: Path) -
     assert [row["arm_order_index"] for row in result_rows] == [None, None]
     assert [row["arm_order"] for row in result_rows] == [[], []]
     assert {row["arm_name"] for row in result_rows} == {"deterministic_oracle_client"}
+    assert all(row["provenance"]["schema_version"] == 1 for row in result_rows)
+    assert all(row["provenance"]["executor_name"] == "deterministic_oracle_client" for row in result_rows)
+    assert all(row["provenance"]["prompt_hash"] == render_prompt(task).canonical_hash for row in result_rows)
+    assert all(isinstance(row["provenance"]["task_hash"], str) for row in result_rows)
+    assert all(isinstance(row["provenance"]["tool_spec_hash"], str) for row in result_rows)
+    candidates = generate_candidates(task.workload)
+    oracle_answer = rank_candidates(task.id, candidates, task.workload.top_k)
+    assert all(row["provenance"]["candidate_set_hash"] == hash_candidate_set(candidates) for row in result_rows)
+    assert all(row["provenance"]["oracle_answer_hash"] == hash_oracle_answer(oracle_answer) for row in result_rows)
 
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert set(manifest) == {
@@ -106,7 +133,10 @@ def test_artifact_creation_writing_and_summary_jsonl_stability(tmp_path: Path) -
         "task_count",
         "result_count",
         "environment",
+        "source",
+        "protocol",
         "controls",
+        "artifacts",
     }
     assert manifest["schema_version"] == 1
     assert manifest["task_count"] == 1
@@ -125,6 +155,26 @@ def test_artifact_creation_writing_and_summary_jsonl_stability(tmp_path: Path) -
     assert isinstance(manifest["environment"]["python_version"], str)
     assert isinstance(manifest["environment"]["python_executable"], str)
     assert isinstance(manifest["environment"]["platform"], str)
+    assert manifest["source"]["vcs"] == "git"
+    assert set(manifest["source"]) == {
+        "vcs",
+        "commit",
+        "branch",
+        "dirty",
+        "diff_hash",
+    }
+    assert manifest["protocol"]["protocol_version"] == "synthetic_pr_triage_v1"
+    assert manifest["protocol"]["hash_algorithm"] == "sha256"
+    assert set(manifest["protocol"]["module_hashes"]) == {
+        "workload",
+        "oracle",
+        "scoring",
+        "prompts",
+    }
+    assert all(
+        isinstance(module_hash, str)
+        for module_hash in manifest["protocol"]["module_hashes"].values()
+    )
     assert set(manifest["environment"]["packages"]) == {
         "codemode-probe",
         "mcp",
@@ -134,6 +184,23 @@ def test_artifact_creation_writing_and_summary_jsonl_stability(tmp_path: Path) -
         "openai",
         "anthropic",
     }
+    assert set(manifest["artifacts"]) == {
+        "tasks.resolved.json",
+        "prompts.resolved.json",
+        "results.jsonl",
+        "summary.json",
+        "paired_deltas.json",
+        "pairing_coverage.json",
+        "paired_delta_summary.json",
+        "workload_regimes.json",
+        "report.md",
+    }
+    results_path = run_dir / "results.jsonl"
+    assert manifest["artifacts"]["results.jsonl"] == {
+        "sha256": sha256(results_path.read_bytes()).hexdigest(),
+        "bytes": results_path.stat().st_size,
+    }
+    assert "manifest.json" not in manifest["artifacts"]
 
     resolved_tasks = json.loads((run_dir / "tasks.resolved.json").read_text())
     assert [resolved_task["id"] for resolved_task in resolved_tasks] == [task.id]
@@ -182,6 +249,36 @@ def test_write_run_artifacts_manifest_includes_suite_config_when_provided(
         "retry_policy": "none",
         "timeout_policy": "per-task timeout_seconds",
     }
+
+
+def test_write_run_artifacts_sources_git_metadata_from_process_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = tiny_task()
+    results = BenchmarkRunner(DeterministicOracleExecutor()).run([task])
+    calls: list[Path | None] = []
+
+    def fake_git_source_metadata(repo_dir: Path | None = None) -> dict[str, object]:
+        calls.append(repo_dir)
+        return {
+            "vcs": "git",
+            "commit": "abc123",
+            "branch": "main",
+            "dirty": False,
+            "diff_hash": None,
+        }
+
+    monkeypatch.setattr(
+        "codemode_probe.artifacts.git_source_metadata",
+        fake_git_source_metadata,
+    )
+
+    run_dir = create_run_dir(tmp_path, run_id="source-context")
+    write_run_artifacts(run_dir, [task], results)
+
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert calls == [None]
+    assert manifest["source"]["commit"] == "abc123"
 
 
 def test_cli_writes_artifacts_without_timestamp_assertions(
