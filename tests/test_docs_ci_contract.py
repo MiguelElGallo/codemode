@@ -32,8 +32,28 @@ def _continued_shell_words(command: str) -> list[str]:
 
 def _cli_args_from_readme_command(command: str, tmp_path: Path) -> list[str]:
     words = _continued_shell_words(command)
-    assert words[:5] == ["uv", "run", "python", "-m", "codemode_probe.cli"]
-    args = words[5:]
+    try:
+        uv_run_index = next(
+            index
+            for index in range(len(words))
+            if words[index : index + 2] == ["uv", "run"]
+        )
+    except StopIteration:  # pragma: no cover
+        raise AssertionError(f"README command does not contain uv run: {command}")
+    command_words = words[uv_run_index:]
+    if command_words[:5] == ["uv", "run", "python", "-m", "codemode_probe.cli"]:
+        args = command_words[5:]
+    else:
+        assert command_words[:7] == [
+            "uv",
+            "run",
+            "--extra",
+            "code-mode",
+            "python",
+            "-m",
+            "codemode_probe.cli",
+        ]
+        args = command_words[7:]
     out_index = args.index("--out") + 1
     args[out_index] = str(tmp_path)
     return args
@@ -48,7 +68,7 @@ def test_readme_cli_snippets_parse_and_delegate_to_benchmark_suite(
         for block in _readme_fenced_blocks("bash")
         if "python -m codemode_probe.cli" in block
     ]
-    assert len(commands) == 2
+    assert len(commands) == 3
     captured: list[dict[str, object]] = []
 
     def fake_run_benchmark_suite(
@@ -126,6 +146,17 @@ def test_readme_cli_snippets_parse_and_delegate_to_benchmark_suite(
             "repetitions": 3,
             "arm_order": "randomized",
             "random_seed": 17,
+        },
+        {
+            "task_ids": ["smoke_smoke_single_lookup"],
+            "arms": ("direct_agent", "code_mode_real"),
+            "normalized_arms": (
+                "direct_mcp_agent_parallel",
+                "code_mode_pydantic_monty",
+            ),
+            "repetitions": 1,
+            "arm_order": "fixed",
+            "random_seed": 1,
         },
     ]
 

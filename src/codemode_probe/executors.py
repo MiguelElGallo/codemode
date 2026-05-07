@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from codemode_probe.code_mode_config import CodeModeConfig, pydantic_code_mode_config
 from codemode_probe.models import ExecutionContext, ExecutionResult, ProbeTask, UsageStats
 from codemode_probe.model_loop import DirectMcpAgentExecutor, ModelClient
 from codemode_probe.mcp_client import DirectMcpSyntheticToolClient
@@ -81,6 +82,31 @@ class CodeModeSyntheticScriptedExecutor:
                 }
             }
         )
+
+
+class PydanticCodeModeMontyExecutor:
+    name = "code_mode_pydantic_monty"
+
+    def __init__(self, config: CodeModeConfig | None = None) -> None:
+        self._config = config or pydantic_code_mode_config(enabled=True)
+
+    def execute(
+        self,
+        task: ProbeTask,
+        *,
+        context: ExecutionContext | None = None,
+    ) -> ExecutionResult:
+        from codemode_probe.code_mode_adapter import run_pydantic_code_mode_task
+
+        return run_pydantic_code_mode_task(task, config=self._config)
+
+    def config_metadata(self) -> dict[str, object]:
+        return {
+            "code_mode_runtime": self._config.runtime.value,
+            "tool_selector": self._config.tool_selector,
+            "max_retries": self._config.max_retries,
+            "model_policy": "scripted_function_model",
+        }
 
 
 class DirectMcpToolOracleExecutor:

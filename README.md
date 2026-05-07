@@ -23,12 +23,12 @@ Implemented:
 - run environment/control metadata, configurable paired baseline, trial provenance, and typed failure categories
 - cache cohort labels and paired bootstrap uncertainty artifacts
 - optional OpenAI, Azure OpenAI, and Anthropic provider transports plus Code Mode runtime dependency boundaries
+- real Pydantic Code Mode/Monty execution arm using a deterministic local model policy
 - budget guards, readiness warnings, and measured-token cost estimate artifacts
 - a benchmark protocol document and evidence register for future live claims
 
 Not yet implemented:
 
-- real Pydantic Code Mode/Monty execution arm
 - provider-enforced cold/warm cache behavior
 - documented minimum sample-size protocol for publishable live-model claims
 
@@ -36,7 +36,7 @@ Synthetic runs should be interpreted as deterministic orchestration harness
 validation, not as a claim that Code Mode beats direct MCP with live models.
 Live provider runs are possible for bounded smoke testing, but publishable claims
 still require filled evidence-register entries, a predeclared sample-size
-protocol, and a real Code Mode/Monty arm.
+protocol, and live-model repetitions over the real Code Mode/Monty arm.
 
 See [docs/benchmark_protocol.md](docs/benchmark_protocol.md) for the formal
 benchmark protocol and [docs/evidence_register.md](docs/evidence_register.md)
@@ -119,6 +119,22 @@ uv run python -m codemode_probe.cli \
   --arm-order randomized \
   --random-seed 17 \
   --paired-baseline-arm direct_mcp_agent_parallel \
+  --out benchmarks/outputs
+```
+
+## Run The Real Code Mode Arm
+
+The `code_mode_pydantic_monty` arm uses Pydantic AI Harness `CodeMode()` and
+Monty for actual code-driven tool orchestration. The model policy is still
+deterministic and local, so this arm validates runtime integration and payload
+suppression without spending live provider budget.
+
+```bash
+uv sync --extra code-mode
+uv run --extra code-mode python -m codemode_probe.cli \
+  --preset smoke \
+  --arms direct_agent,code_mode_real \
+  --repetitions 1 \
   --out benchmarks/outputs
 ```
 
@@ -210,6 +226,5 @@ were skipped because a baseline row was missing.
 
 This benchmark does not yet support claims about live model quality, live
 provider cost, production MCP workloads, provider cache behavior, or general
-Code Mode superiority. Those claims require a real Code Mode/Monty arm, filled
-source-register entries, live-run repetitions over a predeclared task/seed set,
-and an analysis protocol.
+Code Mode superiority. Those claims require filled source-register entries,
+live-run repetitions over a predeclared task/seed set, and an analysis protocol.

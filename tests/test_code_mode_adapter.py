@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 import importlib
 import importlib.machinery
+import importlib.util
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -12,8 +13,12 @@ import pytest
 from codemode_probe.code_mode_adapter import (
     CodeModeAdapterError,
     create_code_mode_capability,
+    run_pydantic_code_mode_task,
 )
 from codemode_probe.code_mode_config import CodeModeConfigError, pydantic_code_mode_config
+from codemode_probe.models import ToolShape
+from codemode_probe.oracle import rank_candidates
+from codemode_probe.workload import generate_candidates, make_probe_task
 
 
 def test_code_mode_adapter_import_does_not_import_optional_runtime(
@@ -99,3 +104,47 @@ def test_create_code_mode_capability_constructs_runtime_with_config(
 
     assert isinstance(capability, FakeCodeMode)
     assert constructed == [{"tools": "benchmark_tools", "max_retries": 1}]
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("pydantic_ai_harness") is None
+    or importlib.util.find_spec("pydantic_monty") is None,
+    reason="real Code Mode runtime optional dependency is not installed",
+)
+@pytest.mark.parametrize("tool_shape", [ToolShape.SCALAR, ToolShape.BATCH])
+def test_run_pydantic_code_mode_task_uses_real_monty_runtime(
+    tool_shape: ToolShape,
+) -> None:
+    task = make_probe_task(
+        f"real-code-mode-{tool_shape.value}",
+        seed=31,
+        tool_shape=tool_shape,
+        shard_count=2,
+        candidates_per_shard=3,
+        payload_bytes=8,
+        relevant_fraction=0.5,
+        top_k=2,
+    )
+
+    execution = run_pydantic_code_mode_task(
+        task,
+        config=pydantic_code_mode_config(enabled=True),
+    )
+
+    assert execution.error is None
+    assert execution.answer == rank_candidates(
+        task.id,
+        generate_candidates(task.workload),
+        task.workload.top_k,
+    )
+    assert execution.usage.model_requests == 2
+    assert execution.usage.tool_calls == (
+        task.workload.shard_count
+        + (1 if tool_shape == ToolShape.BATCH else task.workload.candidate_count)
+    )
+    assert execution.usage.model_visible_bytes_total == 0
+    assert execution.usage.tool_response_bytes_total > 0
+    assert execution.trace.nested_tool_call_count == execution.usage.tool_calls
+    assert execution.raw["code_mode"] == "pydantic_monty"
+    assert execution.raw["run_code_calls"] == 1
+    assert execution.raw["pydantic_tool_calls"] == execution.usage.tool_calls + 1

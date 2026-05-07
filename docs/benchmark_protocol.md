@@ -25,6 +25,9 @@ latency, or cost relative to direct model-driven tool calling.
   parity control.
 - `code_mode_synthetic_scripted`: synthetic Code Mode-style scripted arm with
   hidden tool outputs. This is not a real Pydantic Code Mode/Monty runtime.
+- `code_mode_pydantic_monty`: real Pydantic AI Harness `CodeMode()` arm backed
+  by Monty. It uses a deterministic local model policy to issue `run_code`, so
+  it validates runtime orchestration without making live model-quality claims.
 
 The default paired baseline is `direct_mcp_agent_parallel`.
 
@@ -93,9 +96,10 @@ to the corresponding failure-mode artifact.
 ## Claim Boundaries
 
 Current synthetic runs support claims about harness correctness, deterministic
-artifact generation, pairing behavior, and payload visibility accounting. They
-do not support claims about live model quality, production MCP transport
-overhead, provider cache behavior, or general Code Mode superiority. Live
+artifact generation, pairing behavior, real Code Mode/Monty runtime plumbing,
+and payload visibility accounting. They do not support claims about live model quality,
+production MCP transport overhead, provider cache behavior, or general Code Mode
+superiority. Live
 provider smoke runs validate SDK transport plumbing and artifact accounting, but
 publishable live cost/performance claims require filled evidence-register
 sources, repeated runs over a predeclared task/seed set, and an analysis

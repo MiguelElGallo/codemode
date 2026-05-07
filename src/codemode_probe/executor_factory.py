@@ -9,6 +9,7 @@ from codemode_probe.executors import (
     DirectMcpAgentParallelExecutor,
     DirectMcpToolOracleExecutor,
     InProcessToolOracleExecutor,
+    PydanticCodeModeMontyExecutor,
 )
 from codemode_probe.executor_ids import available_executor_ids, normalize_executor_id
 from codemode_probe.mcp_adapter import build_synthetic_mcp_server
@@ -39,6 +40,8 @@ def build_executor(
         )
     if normalized == "code_mode_synthetic_scripted":
         return CodeModeSyntheticScriptedExecutor()
+    if normalized == "code_mode_pydantic_monty":
+        return PydanticCodeModeMontyExecutor()
     raise ValueError(f"unknown executor id: {executor_id}")
 
 

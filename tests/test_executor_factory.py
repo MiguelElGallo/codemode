@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
 
 from codemode_probe.executor_factory import (
@@ -37,12 +39,15 @@ def test_available_executor_ids_and_aliases_cover_cli_friendly_names() -> None:
         "direct_mcp_tool_oracle",
         "direct_mcp_agent_parallel",
         "code_mode_synthetic_scripted",
+        "code_mode_pydantic_monty",
     )
     assert normalize_executor_id("deterministic_oracle") == "deterministic_oracle_client"
     assert normalize_executor_id("in_process") == "in_process_tool_oracle"
     assert normalize_executor_id("direct_mcp") == "direct_mcp_tool_oracle"
     assert normalize_executor_id("direct_agent") == "direct_mcp_agent_parallel"
     assert normalize_executor_id("code_mode") == "code_mode_synthetic_scripted"
+    assert normalize_executor_id("code_mode_real") == "code_mode_pydantic_monty"
+    assert normalize_executor_id("pydantic_monty") == "code_mode_pydantic_monty"
     assert normalize_executor_id("direct_mcp_agent_parallel") == "direct_mcp_agent_parallel"
 
 
@@ -156,6 +161,25 @@ def test_build_executor_supports_code_mode_alias_and_canonical_id(
     assert result.execution.raw["code_mode"] == "synthetic_scripted"
     assert result.execution.usage.model_visible_bytes_total == 0
     assert result.execution.usage.tool_response_bytes_total > 0
+    assert result.score.top_k_overlap == 1.0
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("pydantic_ai_harness") is None
+    or importlib.util.find_spec("pydantic_monty") is None,
+    reason="real Code Mode runtime optional dependency is not installed",
+)
+def test_build_executor_supports_real_pydantic_monty_code_mode_arm() -> None:
+    task = tiny_task(tool_shape=ToolShape.BATCH)
+
+    result = BenchmarkRunner(build_executor("code_mode_real", task)).run_task(task)
+
+    assert result.arm_name == "code_mode_pydantic_monty"
+    assert result.execution.error is None
+    assert result.execution.raw["code_mode"] == "pydantic_monty"
+    assert result.execution.raw["run_code_calls"] == 1
+    assert result.execution.usage.model_requests == 2
+    assert result.execution.usage.model_visible_bytes_total == 0
     assert result.score.top_k_overlap == 1.0
 
 
