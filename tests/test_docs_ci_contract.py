@@ -211,5 +211,5 @@ def test_readme_setup_command_matches_ci_test_command() -> None:
     assert re.search(r"run:\s*uv run --extra dev pytest -q", ci_text)
     assert "Python 3.11, 3.12, and 3.13" in README.read_text(encoding="utf-8")
     assert "uv build" in ci_text
-    assert "uv run --extra providers pytest -q" in ci_text
-    assert "uv run --extra code-mode pytest -q" in ci_text
+    assert "uv run --extra dev --extra providers pytest -q" in ci_text
+    assert "uv run --extra dev --extra code-mode pytest -q" in ci_text

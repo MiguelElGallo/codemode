@@ -1,5 +1,11 @@
 # Code Mode Probe
 
+[![CI](https://github.com/MiguelElGallo/codemode/actions/workflows/ci.yml/badge.svg)](https://github.com/MiguelElGallo/codemode/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
+![Tests](https://img.shields.io/badge/tests-235%20passed-brightgreen)
+![Coverage](https://img.shields.io/badge/coverage-local%20only-lightgrey)
+![Version](https://img.shields.io/badge/version-0.1.0-blue)
+
 This project is a small benchmark harness for one question:
 
 Can code-driven orchestration over MCP-shaped tools reduce model round trips,

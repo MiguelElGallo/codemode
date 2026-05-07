@@ -52,7 +52,7 @@ jobs:
           /tmp/codemode-wheel/bin/python -c "import codemode_probe"
 
       - name: Check provider extras
-        run: uv run --extra providers pytest -q tests/test_provider_config.py tests/test_provider.py
+        run: uv run --extra dev --extra providers pytest -q tests/test_provider_config.py tests/test_provider.py
 
       - name: Check Code Mode extras
-        run: uv run --extra code-mode pytest -q tests/test_code_mode_config.py tests/test_code_mode_adapter.py
+        run: uv run --extra dev --extra code-mode pytest -q tests/test_code_mode_config.py tests/test_code_mode_adapter.py
