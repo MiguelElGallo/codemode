@@ -1,68 +1,272 @@
 # Code Mode Probe
 
-This repository contains a benchmark harness for probing orchestration cost,
-latency, quality, and payload visibility under synthetic MCP-shaped workloads.
+This project is a small benchmark harness for one question:
 
-The implementation starts with a deterministic synthetic workload and oracle.
-MCP and Code Mode adapters are intentionally layered on top of those contracts
-so the benchmark can separate orchestration effects from runtime and transport
-effects.
+Can code-driven orchestration over MCP-shaped tools reduce model round trips,
+tokens, latency, and model-visible payloads compared with direct tool calling?
 
-## Current Status
+It does not try to prove that Code Mode is always better. It tries to find the
+point where each approach is useful.
 
-Implemented:
+## What The Benchmark Tests
 
-- deterministic synthetic workloads and oracle scoring
-- in-process synthetic tools and a FastMCP adapter
-- direct MCP tool-client normalization
-- scripted direct-MCP agent loop
-- provider-neutral model-client boundary
-- suite orchestration with fixed or seeded randomized arm order
-- smoke and orchestration-matrix presets
-- JSONL artifacts, aggregate summaries, paired deltas, workload regimes, and Markdown reports
-- run environment/control metadata, configurable paired baseline, trial provenance, and typed failure categories
-- cache cohort labels and paired bootstrap uncertainty artifacts
-- optional OpenAI, Azure OpenAI, and Anthropic provider transports plus Code Mode runtime dependency boundaries
-- real Pydantic Code Mode/Monty execution arm using a deterministic local model policy
-- budget guards, readiness warnings, and measured-token cost estimate artifacts
-- a benchmark protocol document and evidence register for future live claims
+### The case
 
-Not yet implemented:
+Imagine a repository triage task.
 
-- provider-enforced cold/warm cache behavior
-- documented minimum sample-size protocol for publishable live-model claims
+The model has to rank candidates that are ready to merge. It should exclude
+drafts and bot-authored candidates. It should look at approvals, CI status,
+reactions, recency, changed-file count, and relevance. Then it should return
+structured JSON.
 
-Synthetic runs should be interpreted as deterministic orchestration harness
-validation, not as a claim that Code Mode beats direct MCP with live models.
-Live provider runs are possible for bounded smoke testing, but publishable claims
-still require filled evidence-register entries, a predeclared sample-size
-protocol, and live-model repetitions over the real Code Mode/Monty arm.
+That is a good benchmark shape because it is not just one lookup.
 
-See [docs/benchmark_protocol.md](docs/benchmark_protocol.md) for the formal
-benchmark protocol and [docs/evidence_register.md](docs/evidence_register.md)
-for the source register required before external cost/performance claims. See
-[docs/tomorrow_run_checklist.md](docs/tomorrow_run_checklist.md) for a bounded
-live-smoke handoff checklist.
+The agent has to:
 
-## Setup
+- search for candidate summaries
+- fetch full candidate payloads
+- filter irrelevant candidates
+- score the remaining candidates
+- return only the ranked result
+
+This is the kind of workflow where direct parallel tool calls help, but they do
+not remove every cost. If each intermediate result has to go back through the
+model context, large fan-out can still become expensive.
+
+### The two arms
+
+The benchmark compares two arms.
+
+The first arm is `direct_mcp_agent_parallel`.
+
+It is a normal model-driven tool loop over MCP-shaped synthetic tools. The
+model receives the task prompt and tool definitions. It asks for a tool call.
+The harness executes the synthetic tool. The tool result is sent back to the
+model. The loop continues until the model returns final JSON.
+
+The second arm is `code_mode_pydantic_monty`.
+
+It uses Pydantic AI Harness `CodeMode()` with Monty as the runtime. The model
+asks for one `run_code` call. The generated Python runs inside Monty and calls
+the same synthetic tools from code. The intermediate tool results stay inside
+the code execution step as nested metadata. They are not sent back as individual
+tool-result messages. The model sees the `run_code` return value.
+
+That is the distinction being tested:
+
+```text
+Direct model-driven tool calling:
+model -> tool call -> tool result back to model -> more tool calls -> final JSON
+
+Code Mode:
+model -> run_code -> Python calls tools inside Monty -> final JSON
+```
+
+### What is sent in the example smoke run
+
+For the example bounded smoke run, the first user message is built from this
+task:
+
+```text
+Rank the top candidates most ready to merge. Exclude drafts and bot-authored candidates. Consider approvals, CI status, reactions, recency, changed-file count, and relevance. Return structured JSON.
+```
+
+The resolved task has one shard, one candidate, scalar tool calls, and `top_k =
+1`.
+
+```json
+{
+  "task_id": "smoke_smoke_single_lookup",
+  "task_parameters": {
+    "shard_count": 1,
+    "candidates_per_shard": 1,
+    "tool_shape": "scalar",
+    "top_k": 1
+  }
+}
+```
+
+This smoke is intentionally tiny. It checks plumbing and accounting. Larger
+fan-out runs are needed to test the cost and latency crossover.
+
+### Direct model-driven arm
+
+In the example Azure run, the direct arm uses the full deployment
+chat-completions URL shown later in this README. Each model turn sends Azure
+OpenAI a request with:
+
+- the task prompt
+- the answer schema
+- the tool definitions
+- the current turn index
+- any previous tool results
+
+On the first turn, Azure returned a tool call:
+
+```json
+{"name": "search_shard", "arguments": {"shard_id": 0}}
+```
+
+The harness executed the tool and sent this result back to Azure:
+
+```json
+{
+  "category": "infra",
+  "id": "cand-0000",
+  "shard_id": 0,
+  "title": "tests candidate 0"
+}
+```
+
+On the second turn, Azure returned another tool call:
+
+```json
+{"name": "fetch_candidate", "arguments": {"candidate_id": "cand-0000"}}
+```
+
+The harness executed the tool and sent the full candidate payload back to Azure.
+This abbreviated snippet shows the fields used for scoring. The actual full
+payload also includes fields such as `category`, `shard_id`, and the synthetic
+`payload` body. Those omitted fields still count toward
+`tool_response_bytes_total` and model-visible bytes.
+
+```json
+{
+  "age_days": 45,
+  "approvals": 0,
+  "changed_files": 38,
+  "failing_checks": 1,
+  "id": "cand-0000",
+  "is_bot_authored": false,
+  "is_draft": false,
+  "reactions": 8,
+  "relevance": 0.4528,
+  "title": "tests candidate 0"
+}
+```
+
+On the third turn, Azure returned the final answer:
+
+```json
+{
+  "task_id": "smoke_smoke_single_lookup",
+  "candidates": [
+    {
+      "id": "cand-0000",
+      "score": 0.4528
+    }
+  ]
+}
+```
+
+The important part is visibility.
+
+In this arm, the synthetic tool results are visible to the model. In the
+example three-repetition smoke run, that was `567` model-visible
+tool-response bytes per repetition.
+
+### Code Mode and Monty arm
+
+The Code Mode arm uses the same task and the same synthetic tools.
+
+The current benchmark implementation uses a deterministic local Pydantic
+`FunctionModel` for the model policy. That keeps the run reproducible and avoids
+spending provider budget on this arm. The runtime being tested is still real
+Pydantic Code Mode with Monty.
+
+The arms do not yet use the same live model policy. Quality, latency, and cost
+comparisons should be read as harness/runtime evidence, not as causal
+live-model evidence for Code Mode.
+
+The local model returns one `run_code` call:
+
+```json
+{
+  "tool_name": "run_code",
+  "arguments": {
+    "restart": true,
+    "code": "import asyncio\n\nshards = await asyncio.gather(...)\n..."
+  }
+}
+```
+
+The Python code runs inside Monty and calls the same tools:
+
+```python
+shards = await asyncio.gather(search_shard(shard_id=0))
+candidate_ids = [item["id"] for shard in shards for item in shard]
+fetched = await asyncio.gather(
+    *[fetch_candidate(candidate_id=candidate_id) for candidate_id in candidate_ids]
+)
+```
+
+Then the code filters, scores, sorts, and returns the final structured answer:
+
+```json
+{
+  "task_id": "smoke_smoke_single_lookup",
+  "candidates": [
+    {
+      "id": "cand-0000",
+      "score": 0.38048
+    }
+  ]
+}
+```
+
+Notice that the tool payloads were still fetched. They were not ignored. They
+were just processed inside `run_code` instead of being sent back as model-visible
+tool messages. The `run_code` return is still model-visible.
+
+In the example three-repetition smoke run, this arm fetched the same `567`
+tool-response bytes per repetition, but `0` of those bytes were model-visible
+tool-response bytes.
+
+### What the example smoke run showed
+
+The bounded smoke run compared:
+
+```bash
+--preset smoke --arms direct_agent,code_mode_real --repetitions 3 --arm-order randomized
+```
+
+Both arms returned schema-valid answers and selected the same top candidate.
+The smoke success criterion is ranking agreement, not score equality. The shown
+scores are produced by different policies and should not be treated as
+calibrated probabilities.
+
+The direct Azure arm used `3` model requests per trial.
+
+The Code Mode/Monty arm used `2` model requests per trial.
+
+The direct Azure arm exposed tool results to the model.
+
+The Code Mode/Monty arm kept tool results inside nested Code Mode metadata.
+
+That shows the harness can route direct live tool calls and local
+Code Mode/Monty execution while accounting for different payload visibility. It
+does not isolate model-policy effects, and it is not a publishable benchmark
+claim yet. For that, run more repetitions over larger fan-out workloads and
+predeclare the scoring protocol.
+
+## Run It On Your Machine
+
+### Requirements
+
+You need Python `3.11` or newer and `uv`.
+
+Install the development dependencies:
 
 ```bash
 uv sync --extra dev
 uv run --extra dev pytest -q
 ```
 
-Optional integrations are installed only when needed:
+CI runs the same test command on Python 3.11, 3.12, and 3.13.
 
-```bash
-uv sync --extra providers
-uv sync --extra code-mode
-```
+### Run a local synthetic smoke
 
-The package requires Python 3.11 or newer. The CI workflow runs the test suite
-on Python 3.11, 3.12, and 3.13, then builds the package and checks optional
-provider and Code Mode extras.
-
-## Run A Smoke Benchmark
+Start with the local run. It does not use a live model key.
 
 ```bash
 uv run python -m codemode_probe.cli \
@@ -72,29 +276,88 @@ uv run python -m codemode_probe.cli \
   --out benchmarks/outputs
 ```
 
-## Run A Live Provider Smoke
+This checks that the workload, tools, scoring, and artifact writer work on your
+machine.
 
-Install provider extras, export the Azure OpenAI API key and endpoint, and use strict budget
-guards. The Azure endpoint may be either the resource base URL or the full
-deployment chat-completions URL from Azure AI Foundry. Fill the pricing and documentation source IDs from
-[docs/evidence_register.md](docs/evidence_register.md) before treating cost rows
-as source-backed. `--provider-model` is the Azure OpenAI deployment name.
+### Run the real Code Mode arm locally
 
-```console
+Install the Code Mode extra:
+
+```bash
+uv sync --extra code-mode
+```
+
+Run the direct synthetic agent beside the real Pydantic Code Mode/Monty arm:
+
+```bash
+uv run --extra code-mode python -m codemode_probe.cli \
+  --preset smoke \
+  --arms direct_agent,code_mode_real \
+  --repetitions 1 \
+  --out benchmarks/outputs
+```
+
+This run validates the real Code Mode runtime path without using a live Azure
+OpenAI model for the Code Mode arm.
+
+### Prepare Azure OpenAI credentials
+
+Install the provider extra:
+
+```bash
 uv sync --extra providers
-export AZURE_OPENAI_API_KEY=...
-export AZURE_OPENAI_ENDPOINT="https://<resource>.cognitiveservices.azure.com/openai/deployments/<deployment>/chat/completions?api-version=2025-01-01-preview"
+```
+
+Create a local environment file. This file is ignored by git.
+
+```bash
+cat > .env.local <<'EOF'
+AZURE_OPENAI_API_KEY=YOUR_KEY
+AZURE_OPENAI_ENDPOINT="https://YOUR_RESOURCE_NAME.cognitiveservices.azure.com/openai/deployments/YOUR_AZURE_DEPLOYMENT_NAME/chat/completions?api-version=2025-01-01-preview"
+EOF
+```
+
+Load it in your shell:
+
+```bash
+set -a
+source .env.local
+set +a
+```
+
+The endpoint can be either the Azure OpenAI resource endpoint or the full
+deployment chat-completions URL from Azure AI Foundry. If you use the full URL,
+the harness extracts the deployment name from the path. You still pass the
+deployment name with `--provider-model`.
+
+Set these helper values before copying the live commands:
+
+```bash
+export AZURE_OPENAI_DEPLOYMENT=YOUR_AZURE_DEPLOYMENT_NAME
+export PROVIDER_SDK_VERSION=$(uv run --extra providers python -c 'import openai; print(openai.__version__)')
+```
+
+### Run a bounded Azure smoke
+
+Use strict budget guards first.
+
+The pricing source and token rates below are OpenAI public-pricing assumptions
+used as a smoke-run budget guard. Replace them with Azure-backed pricing
+evidence before treating `cost_estimates.json` as source-backed billing
+evidence.
+
+```bash
 uv run --extra providers python -m codemode_probe.cli \
   --preset smoke \
   --arms direct_agent \
   --repetitions 1 \
   --provider azure_openai \
-  --provider-model <azure-deployment-name> \
+  --provider-model "$AZURE_OPENAI_DEPLOYMENT" \
   --provider-api-key-env-var AZURE_OPENAI_API_KEY \
   --provider-endpoint-env-var AZURE_OPENAI_ENDPOINT \
   --provider-model-version gpt-4.1-mini \
   --provider-api-version 2025-01-01-preview \
-  --provider-sdk-version <installed-openai-version> \
+  --provider-sdk-version "$PROVIDER_SDK_VERSION" \
   --provider-pricing-source-id openai-gpt-4-1-mini-docs-2026-05-06 \
   --provider-model-docs-source-id openai-gpt-4-1-mini-docs-2026-05-06 \
   --provider-pricing-snapshot-date 2026-05-06 \
@@ -109,39 +372,67 @@ uv run --extra providers python -m codemode_probe.cli \
   --out benchmarks/outputs
 ```
 
-## Run The Orchestration Matrix
+### Run Azure direct beside local Code Mode
+
+Install both optional extras:
 
 ```bash
-uv run python -m codemode_probe.cli \
-  --preset orchestration_matrix \
-  --arms direct_mcp_agent_parallel,direct_mcp_tool_oracle,in_process_tool_oracle \
-  --repetitions 3 \
-  --arm-order randomized \
-  --random-seed 17 \
-  --paired-baseline-arm direct_mcp_agent_parallel \
-  --out benchmarks/outputs
+uv sync --extra providers --extra code-mode
 ```
 
-## Run The Real Code Mode Arm
-
-The `code_mode_pydantic_monty` arm uses Pydantic AI Harness `CodeMode()` and
-Monty for actual code-driven tool orchestration. The model policy is still
-deterministic and local, so this arm validates runtime integration and payload
-suppression without spending live provider budget.
+Then run the comparison:
 
 ```bash
-uv sync --extra code-mode
-uv run --extra code-mode python -m codemode_probe.cli \
+uv run --extra providers --extra code-mode python -m codemode_probe.cli \
   --preset smoke \
   --arms direct_agent,code_mode_real \
-  --repetitions 1 \
+  --repetitions 3 \
+  --arm-order randomized \
+  --provider azure_openai \
+  --provider-model "$AZURE_OPENAI_DEPLOYMENT" \
+  --provider-api-key-env-var AZURE_OPENAI_API_KEY \
+  --provider-endpoint-env-var AZURE_OPENAI_ENDPOINT \
+  --provider-model-version gpt-4.1-mini \
+  --provider-api-version 2025-01-01-preview \
+  --provider-sdk-version "$PROVIDER_SDK_VERSION" \
+  --provider-pricing-source-id openai-gpt-4-1-mini-docs-2026-05-06 \
+  --provider-model-docs-source-id openai-gpt-4-1-mini-docs-2026-05-06 \
+  --provider-pricing-snapshot-date 2026-05-06 \
+  --provider-currency USD \
+  --enable-live \
+  --max-model-requests 25 \
+  --max-run-seconds 300 \
+  --max-estimated-cost 1.00 \
+  --budget-input-cost-per-1m 0.40 \
+  --budget-output-cost-per-1m 1.60 \
+  --budget-currency USD \
   --out benchmarks/outputs
 ```
 
-## Artifact Layout
+The direct arm spends live Azure OpenAI budget.
 
-Each run writes a timestamped directory under `benchmarks/outputs` unless
-`--run-id` is provided.
+The Code Mode arm uses the deterministic local model policy and the real
+Pydantic Code Mode/Monty runtime.
+
+This is not a like-for-like live-model comparison for the Code Mode arm. It is
+a bounded comparison of a live direct model loop beside a local scripted
+Code Mode/Monty runtime.
+
+### Inspect the result
+
+Each run creates a timestamped folder under `benchmarks/outputs`.
+
+Open these files first:
+
+- `report.md` for a readable summary
+- `summary.json` for aggregate metrics
+- `results.jsonl` for canonical per-arm result rows
+- `transcripts.jsonl` for normalized model turns and tool activity
+- `paired_deltas.json` for paired comparisons against the direct baseline
+- `warnings.json` for claim and readiness caveats
+- `cost_estimates.json` for measured-token cost estimates
+
+The run folder contains these artifacts:
 
 ```text
 manifest.json
@@ -163,68 +454,48 @@ workload_regimes.json
 report.md
 ```
 
-`results.jsonl` is the canonical machine-readable record. `transcripts.jsonl`
-is a normalized, redacted transcript view for inspecting model turns and tool
-activity. `summary.json`, `paired_deltas.json`, `pairing_coverage.json`,
-`paired_delta_summary.json`, `paired_uncertainty.json`, `cache_cohorts.json`,
-`failure_modes.json`, `cost_estimates.json`, `preflight.json`, `warnings.json`,
-and `workload_regimes.json` are derived from the run results and run controls.
-`cost_estimates.json` uses measured token fields only when source-backed pricing
-metadata is present; otherwise rows are explicit `not_estimated` entries.
-`report.md` is presentation-only.
-
-`manifest.json` records the normalized arms, selected paired-delta baseline,
-arm-order seed, retry/concurrency/cache policy labels, claim scope,
-Python/platform metadata, git source metadata, benchmark protocol version/module
-hashes, protocol/evidence document hashes, optional integration package
-versions when installed, optional budget controls/estimates, and SHA-256
-checksums for the emitted artifact files.
-
-Optional provider settings can be recorded without credentials by passing
-`--provider`, `--provider-model`, and `--provider-dry-run`. Without
-`--provider-dry-run`, provider configs require `--enable-live` and pass SDK plus
-API-key environment checks before any run artifacts are created. Live provider
-turns use provider-native tool-calling transcripts: OpenAI Responses API
-`function_call_output` items, Azure OpenAI chat-completions tool messages when
-the endpoint is a deployment chat URL, and Anthropic Messages API `tool_result`
-blocks.
-
-Optional budget guards can be set with `--max-run-seconds`,
-`--max-model-requests`, `--max-input-tokens`, `--max-output-tokens`, and
-`--max-estimated-cost`. Budget checks run before live provider validation and
-before artifact directories are created. Token and cost budgets use deterministic
-planning heuristics; pass `--budget-input-cost-per-1m`,
-`--budget-output-cost-per-1m`, and `--budget-currency` to source cost estimates.
-
-## Interpreting Results
-
-The most defensible comparisons are paired by `(task_id, repetition, trial_id)`.
-The default paired-delta baseline is `direct_mcp_agent_parallel`; override it
-with `--paired-baseline-arm`. Suite-generated result rows include `trial_id`,
-`arm_order`, and `arm_order_index` so latency deltas can be audited against the
-actual execution order.
-
-Payload suppression is:
+The main serialized tool-response byte suppression metric is:
 
 ```text
 1 - model_visible_bytes_total / tool_response_bytes_total
 ```
 
-Cache cohorts are recorded in `results.jsonl`, `manifest.json`, and
-`cache_cohorts.json`. Provider adapters are still responsible for enforcing any
-real provider-side cache behavior. Cache warmup repetitions are only valid with
-`warm` or `cold_then_warm` cache policies, and those configurations must leave
-at least one measured warm repetition outside warmup rows. `warm` requires at
-least one warmup repetition; `cold` is restricted to one repetition until cache
-busting is implemented.
+If the value is close to `1`, most fetched tool payload stayed out of the model
+context. If it is `0`, the fetched tool payload was fully model-visible.
+If `tool_response_bytes_total` is `0`, the metric is not meaningful.
 
-`pairing_coverage.json` records how many trial groups had the configured
-paired-delta baseline, how many comparison results were paired, and how many
-were skipped because a baseline row was missing.
+### Keep the claim narrow
 
-## Claims Not Supported Yet
+A successful smoke run means the harness works and the arms can be compared.
 
-This benchmark does not yet support claims about live model quality, live
-provider cost, production MCP workloads, provider cache behavior, or general
-Code Mode superiority. Those claims require filled source-register entries,
-live-run repetitions over a predeclared task/seed set, and an analysis protocol.
+It does not prove general Code Mode superiority.
+
+For external claims, use the protocol in
+[docs/benchmark_protocol.md](docs/benchmark_protocol.md), fill the source
+register in [docs/evidence_register.md](docs/evidence_register.md), and use the
+handoff checklist in
+[docs/tomorrow_run_checklist.md](docs/tomorrow_run_checklist.md). Then run more
+repetitions and sweep larger fan-out workloads.
+
+### Example longer run results
+
+This example run used one scalar fan-out task with `5` shards, `5` candidates
+per shard, `top_k = 5`, and `3` repetitions.
+
+The direct arm used live Azure OpenAI. The Code Mode arm used the local
+deterministic model policy with real Pydantic Code Mode/Monty execution.
+
+| Arm | Runs | Success | Mean top-k | Mean NDCG | P95 latency ms | Model requests | Tool calls | Model-visible tool bytes | Suppression |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `direct_mcp_agent_parallel` | 3 | 1.000 | 0.400 | 0.295 | 25122.239 | 17 | 90 | 42405 | 0.000 |
+| `code_mode_pydantic_monty` | 3 | 1.000 | 1.000 | 1.000 | 271.053 | 6 | 90 | 0 | 1.000 |
+
+Estimated cost rows for that run were:
+
+| Arm | Input tokens | Output tokens | Estimated cost |
+| --- | ---: | ---: | ---: |
+| `direct_mcp_agent_parallel` | 71328 | 3496 | `$0.034125` |
+| `code_mode_pydantic_monty` | 1029 | 1710 | `$0.003148` |
+
+These cost rows use OpenAI public-pricing assumptions as a budget guard, not
+verified Azure billing evidence.

@@ -33,27 +33,14 @@ def _continued_shell_words(command: str) -> list[str]:
 def _cli_args_from_readme_command(command: str, tmp_path: Path) -> list[str]:
     words = _continued_shell_words(command)
     try:
-        uv_run_index = next(
+        module_index = next(
             index
             for index in range(len(words))
-            if words[index : index + 2] == ["uv", "run"]
+            if words[index : index + 3] == ["python", "-m", "codemode_probe.cli"]
         )
     except StopIteration:  # pragma: no cover
-        raise AssertionError(f"README command does not contain uv run: {command}")
-    command_words = words[uv_run_index:]
-    if command_words[:5] == ["uv", "run", "python", "-m", "codemode_probe.cli"]:
-        args = command_words[5:]
-    else:
-        assert command_words[:7] == [
-            "uv",
-            "run",
-            "--extra",
-            "code-mode",
-            "python",
-            "-m",
-            "codemode_probe.cli",
-        ]
-        args = command_words[7:]
+        raise AssertionError(f"README command does not contain CLI module: {command}")
+    args = words[module_index + 3 :]
     out_index = args.index("--out") + 1
     args[out_index] = str(tmp_path)
     return args
@@ -67,8 +54,9 @@ def test_readme_cli_snippets_parse_and_delegate_to_benchmark_suite(
         block
         for block in _readme_fenced_blocks("bash")
         if "python -m codemode_probe.cli" in block
+        and "--provider azure_openai" not in block
     ]
-    assert len(commands) == 3
+    assert len(commands) == 2
     captured: list[dict[str, object]] = []
 
     def fake_run_benchmark_suite(
@@ -125,29 +113,6 @@ def test_readme_cli_snippets_parse_and_delegate_to_benchmark_suite(
             "random_seed": 1,
         },
         {
-            "task_ids": [
-                "orchestration_matrix_single_lookup",
-                "orchestration_matrix_small_parallel_lookup",
-                "orchestration_matrix_scalar_large_fanout_25",
-                "orchestration_matrix_scalar_large_fanout_100",
-                "orchestration_matrix_batch_large_fanout_100",
-                "orchestration_matrix_deep_branching_filter_rank",
-            ],
-            "arms": (
-                "direct_mcp_agent_parallel",
-                "direct_mcp_tool_oracle",
-                "in_process_tool_oracle",
-            ),
-            "normalized_arms": (
-                "direct_mcp_agent_parallel",
-                "direct_mcp_tool_oracle",
-                "in_process_tool_oracle",
-            ),
-            "repetitions": 3,
-            "arm_order": "randomized",
-            "random_seed": 17,
-        },
-        {
             "task_ids": ["smoke_smoke_single_lookup"],
             "arms": ("direct_agent", "code_mode_real"),
             "normalized_arms": (
@@ -159,6 +124,25 @@ def test_readme_cli_snippets_parse_and_delegate_to_benchmark_suite(
             "random_seed": 1,
         },
     ]
+
+
+def test_readme_live_provider_snippets_are_shell_safe() -> None:
+    commands = [
+        block
+        for block in _readme_fenced_blocks("bash")
+        if "python -m codemode_probe.cli" in block
+        and "--provider azure_openai" in block
+    ]
+
+    assert len(commands) == 2
+    for command in commands:
+        assert "<" not in command
+        assert ">" not in command
+        words = _continued_shell_words(command)
+        assert "--provider-model" in words
+        assert "$AZURE_OPENAI_DEPLOYMENT" in words
+        assert "--provider-sdk-version" in words
+        assert "$PROVIDER_SDK_VERSION" in words
 
 
 def test_readme_artifact_layout_matches_writer_outputs(tmp_path: Path) -> None:
