@@ -17,8 +17,8 @@ latency, or cost relative to direct model-driven tool calling.
 ## Arms
 
 - `direct_mcp_agent_parallel`: direct model-driven MCP-shaped agent loop. Today
-  this uses a scripted provider client unless a future live provider arm is
-  explicitly selected.
+  this uses a scripted provider client unless a live provider is explicitly
+  selected with `--provider ... --enable-live`.
 - `direct_mcp_tool_oracle`: direct MCP tool-client path with deterministic
   oracle ranking.
 - `in_process_tool_oracle`: in-process tool oracle used as a deterministic
@@ -68,6 +68,17 @@ Cache policy fields are cohort labels unless a live provider or Code Mode
 adapter explicitly enforces provider-side cache state. Warmup rows should not be
 used as headline measurements for warm-cache claims.
 
+Budget controls are pre-run guards, not measured usage. When configured, they
+are evaluated before live provider validation and before artifact creation.
+Model-request budgets use the planned task/repetition/arm matrix and per-task
+tool-call ceilings. Token and cost budgets use deterministic planning heuristics
+and require explicit pricing metadata for cost caps.
+
+`cost_estimates.json` is post-run accounting over measured token fields. Rows
+must be marked `not_estimated` when provider pricing evidence, token price
+rates, or token usage fields are missing. Cache token costs are not estimated
+unless a future pricing schema records cache-specific rates.
+
 ## Exclusion Rules
 
 Timeouts, schema failures, missing baselines, duplicate trial-arm groups, and
@@ -79,6 +90,9 @@ to the corresponding failure-mode artifact.
 
 Current synthetic runs support claims about harness correctness, deterministic
 artifact generation, pairing behavior, and payload visibility accounting. They
-do not support claims about live model quality, live provider cost, production
-MCP transport overhead, provider cache behavior, or general Code Mode
-superiority.
+do not support claims about live model quality, production MCP transport
+overhead, provider cache behavior, or general Code Mode superiority. Live
+provider smoke runs validate SDK transport plumbing and artifact accounting, but
+publishable live cost/performance claims require filled evidence-register
+sources, repeated runs over a predeclared task/seed set, and an analysis
+protocol.

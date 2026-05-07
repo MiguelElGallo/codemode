@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import signal
+import sys
 import time
+from datetime import date
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +24,7 @@ from codemode_probe.models import (
     UsageStats,
 )
 from codemode_probe.prompts import render_prompt
+from codemode_probe.provider import ProviderTurnResponse
 from codemode_probe.provider_config import anthropic_config
 from codemode_probe.provenance import hash_candidate_set, hash_oracle_answer
 from codemode_probe.oracle import rank_candidates
@@ -294,8 +297,10 @@ def test_artifact_creation_writing_and_summary_jsonl_stability(tmp_path: Path) -
         "paired_uncertainty.json",
         "cache_cohorts.json",
         "failure_modes.json",
+        "cost_estimates.json",
         "workload_regimes.json",
         "preflight.json",
+        "warnings.json",
         "report.md",
     }
     results_path = run_dir / "results.jsonl"
@@ -391,6 +396,13 @@ def test_write_run_artifacts_manifest_includes_provider_config_when_provided(
         api_key_env_var="ANTHROPIC_TEST_KEY",
         timeout_seconds=12.5,
         temperature=0.2,
+        model_version="2026-02-14",
+        api_version="messages-v1",
+        sdk_version="0.74.0",
+        pricing_source_id="anthropic-pricing-2026-05-06",
+        model_docs_source_id="anthropic-model-docs-2026-05-06",
+        pricing_snapshot_date=date(2026, 5, 6),
+        currency="USD",
     )
 
     run_dir = create_run_dir(tmp_path, run_id="provider-manifest")
@@ -404,6 +416,13 @@ def test_write_run_artifacts_manifest_includes_provider_config_when_provided(
         "api_key_env_var": "ANTHROPIC_TEST_KEY",
         "timeout_seconds": 12.5,
         "temperature": 0.2,
+        "model_version": "2026-02-14",
+        "api_version": "messages-v1",
+        "sdk_version": "0.74.0",
+        "pricing_source_id": "anthropic-pricing-2026-05-06",
+        "model_docs_source_id": "anthropic-model-docs-2026-05-06",
+        "pricing_snapshot_date": "2026-05-06",
+        "currency": "USD",
     }
     assert manifest["claim_scope"] == "dry_run_provider_config"
 
@@ -581,6 +600,20 @@ def test_cli_provider_dry_run_records_config_without_sdk_or_env_checks(
             "9.5",
             "--provider-temperature",
             "0.1",
+            "--provider-model-version",
+            "2026-04-01",
+            "--provider-api-version",
+            "responses-v1",
+            "--provider-sdk-version",
+            "2.9.0",
+            "--provider-pricing-source-id",
+            "openai-pricing-2026-05-06",
+            "--provider-model-docs-source-id",
+            "openai-model-docs-2026-05-06",
+            "--provider-pricing-snapshot-date",
+            "2026-05-06",
+            "--provider-currency",
+            "USD",
             "--provider-dry-run",
         ],
     )
@@ -595,6 +628,13 @@ def test_cli_provider_dry_run_records_config_without_sdk_or_env_checks(
         "api_key_env_var": "OPENAI_TEST_KEY",
         "timeout_seconds": 9.5,
         "temperature": 0.1,
+        "model_version": "2026-04-01",
+        "api_version": "responses-v1",
+        "sdk_version": "2.9.0",
+        "pricing_source_id": "openai-pricing-2026-05-06",
+        "model_docs_source_id": "openai-model-docs-2026-05-06",
+        "pricing_snapshot_date": "2026-05-06",
+        "currency": "USD",
     }
     assert manifest["claim_scope"] == "dry_run_provider_config"
 
@@ -619,6 +659,187 @@ def test_cli_provider_without_dry_run_requires_explicit_live_enable_before_artif
         main()
 
     assert not (tmp_path / "provider-disabled").exists()
+
+
+def test_cli_live_provider_requires_compatible_sdk_before_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "importlib.util.find_spec",
+        lambda package: SimpleNamespace(name=package),
+    )
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace())
+    monkeypatch.setenv("OPENAI_TEST_KEY", "test-key")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "provider-incompatible-sdk",
+            "--skip-preflight",
+            "--provider",
+            "openai",
+            "--provider-model",
+            "gpt-test",
+            "--provider-api-key-env-var",
+            "OPENAI_TEST_KEY",
+            "--enable-live",
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="does not expose AsyncOpenAI"):
+        main()
+
+    assert not (tmp_path / "provider-incompatible-sdk").exists()
+
+
+def test_cli_budget_guard_runs_before_live_provider_validation_or_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_find_spec(package: str) -> None:
+        raise AssertionError(f"budget failure should not inspect SDK package {package}")
+
+    monkeypatch.setattr("importlib.util.find_spec", fail_find_spec)
+    monkeypatch.delenv("OPENAI_TEST_KEY", raising=False)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "budget-before-provider",
+            "--skip-preflight",
+            "--arms",
+            "direct_agent",
+            "--max-tool-calls",
+            "2",
+            "--max-model-requests",
+            "2",
+            "--provider",
+            "openai",
+            "--provider-model",
+            "gpt-test",
+            "--provider-api-key-env-var",
+            "OPENAI_TEST_KEY",
+            "--enable-live",
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="budget exceeded: model request upper bound"):
+        main()
+
+    assert not (tmp_path / "budget-before-provider").exists()
+
+
+def test_cli_records_budget_config_and_estimate_in_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "budget-manifest",
+            "--skip-preflight",
+            "--arms",
+            "direct_agent",
+            "--max-tool-calls",
+            "1",
+            "--max-model-requests",
+            "10",
+            "--max-run-seconds",
+            "1000",
+            "--max-estimated-cost",
+            "1.0",
+            "--budget-input-cost-per-1m",
+            "2.0",
+            "--budget-output-cost-per-1m",
+            "8.0",
+            "--budget-currency",
+            "USD",
+        ],
+    )
+
+    main()
+
+    manifest = json.loads((tmp_path / "budget-manifest" / "manifest.json").read_text())
+    assert manifest["budget"]["config"] == {
+        "max_run_seconds": 1000.0,
+        "max_model_requests": 10,
+        "max_input_tokens": None,
+        "max_output_tokens": None,
+        "max_estimated_cost": 1.0,
+        "input_cost_per_1m_tokens": 2.0,
+        "output_cost_per_1m_tokens": 8.0,
+        "currency": "USD",
+    }
+    assert manifest["budget"]["estimate"]["model_request_upper_bound"] == 2
+    assert manifest["budget"]["estimate"]["cost_estimated"] is True
+    assert manifest["budget"]["estimate"]["currency"] == "USD"
+
+
+def test_cli_live_provider_uses_provider_client_in_direct_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeProviderClient:
+        provider_name = "fake-live"
+        model_name = "fake-model"
+
+        async def run_provider_turn(self, request):
+            return ProviderTurnResponse(
+                final_answer={"task_id": request.rendered_prompt.task_id, "candidates": []},
+                stop_reason="final_answer",
+                raw={"request_id": "fake-1"},
+            )
+
+    captured = {}
+
+    def fake_build_provider_client(config):
+        captured["provider"] = config.provider.value
+        captured["enabled"] = config.enabled
+        captured["model"] = config.model
+        return FakeProviderClient()
+
+    monkeypatch.setattr(
+        "importlib.util.find_spec",
+        lambda package: SimpleNamespace(name=package),
+    )
+    monkeypatch.setenv("OPENAI_TEST_KEY", "test-key")
+    monkeypatch.setattr("codemode_probe.cli.build_provider_client", fake_build_provider_client)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "provider-live",
+            "--skip-preflight",
+            "--arms",
+            "direct_agent",
+            "--provider",
+            "openai",
+            "--provider-model",
+            "gpt-test",
+            "--provider-api-key-env-var",
+            "OPENAI_TEST_KEY",
+            "--enable-live",
+        ],
+    )
+
+    main()
+
+    assert captured == {"provider": "openai", "enabled": True, "model": "gpt-test"}
+    manifest = json.loads((tmp_path / "provider-live" / "manifest.json").read_text())
+    assert manifest["claim_scope"] == "live_provider_config_validated"
+    row = json.loads((tmp_path / "provider-live" / "results.jsonl").read_text())
+    assert row["execution"]["raw"]["model_turns"][0]["provider_name"] == "fake-live"
+    assert row["execution"]["raw"]["model_turns"][0]["model_name"] == "fake-model"
 
 
 def test_cli_arms_selection_writes_one_result_row_per_arm(
@@ -1039,7 +1260,7 @@ def test_cli_delegates_arm_order_and_random_seed_to_suite_config(
 ) -> None:
     captured = {}
 
-    def fake_run_benchmark_suite(tasks: list[ProbeTask], config: object) -> list[object]:
+    def fake_run_benchmark_suite(tasks: list[ProbeTask], config: object, **kwargs) -> list[object]:
         captured["task_ids"] = [task.id for task in tasks]
         captured["arms"] = config.arms
         captured["repetitions"] = config.repetitions
@@ -1049,6 +1270,7 @@ def test_cli_delegates_arm_order_and_random_seed_to_suite_config(
         captured["cache_policy"] = config.cache_policy
         captured["cache_namespace"] = config.cache_namespace
         captured["cache_warmup_repetitions"] = config.cache_warmup_repetitions
+        captured["has_executor_factory"] = callable(kwargs["executor_factory"])
         return []
 
     monkeypatch.setattr(
@@ -1097,6 +1319,7 @@ def test_cli_delegates_arm_order_and_random_seed_to_suite_config(
         "cache_policy": CachePolicy.WARM,
         "cache_namespace": "cli-cache",
         "cache_warmup_repetitions": 1,
+        "has_executor_factory": True,
     }
     assert manifest["suite"] == {
         "arms": ["direct_agent", "in_process"],

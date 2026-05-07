@@ -98,4 +98,4 @@ def _task(
     required_tool_calls = shard_count + (
         1 if tool_shape == ToolShape.BATCH else shard_count * candidates_per_shard
     )
-    return task.model_copy(update={"max_tool_calls": max(task.max_tool_calls, required_tool_calls)})
+    return task.model_copy(update={"max_tool_calls": required_tool_calls})

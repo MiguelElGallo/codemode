@@ -22,23 +22,27 @@ Implemented:
 - JSONL artifacts, aggregate summaries, paired deltas, workload regimes, and Markdown reports
 - run environment/control metadata, configurable paired baseline, trial provenance, and typed failure categories
 - cache cohort labels and paired bootstrap uncertainty artifacts
-- optional provider and Code Mode runtime dependency boundaries
+- optional OpenAI/Anthropic provider transports and Code Mode runtime dependency boundaries
+- budget guards, readiness warnings, and measured-token cost estimate artifacts
 - a benchmark protocol document and evidence register for future live claims
 
 Not yet implemented:
 
-- real provider SDK adapter
 - real Pydantic Code Mode/Monty execution arm
 - provider-enforced cold/warm cache behavior
 - documented minimum sample-size protocol for publishable live-model claims
 
-Until those pieces exist, results should be interpreted as deterministic
-orchestration harness validation, not as a claim that Code Mode beats direct
-MCP with live models.
+Synthetic runs should be interpreted as deterministic orchestration harness
+validation, not as a claim that Code Mode beats direct MCP with live models.
+Live provider runs are possible for bounded smoke testing, but publishable claims
+still require filled evidence-register entries, a predeclared sample-size
+protocol, and a real Code Mode/Monty arm.
 
 See [docs/benchmark_protocol.md](docs/benchmark_protocol.md) for the formal
 benchmark protocol and [docs/evidence_register.md](docs/evidence_register.md)
-for the source register required before external cost/performance claims.
+for the source register required before external cost/performance claims. See
+[docs/tomorrow_run_checklist.md](docs/tomorrow_run_checklist.md) for a bounded
+live-smoke handoff checklist.
 
 ## Setup
 
@@ -65,6 +69,40 @@ uv run python -m codemode_probe.cli \
   --preset smoke \
   --arms deterministic_oracle_client,in_process,direct_mcp,direct_agent \
   --repetitions 1 \
+  --out benchmarks/outputs
+```
+
+## Run A Live Provider Smoke
+
+Install provider extras, export the provider API key, and use strict budget
+guards. Fill the pricing and documentation source IDs from
+[docs/evidence_register.md](docs/evidence_register.md) before treating cost rows
+as source-backed.
+
+```console
+uv sync --extra providers
+export OPENAI_API_KEY=...
+uv run --extra providers python -m codemode_probe.cli \
+  --preset smoke \
+  --arms direct_agent \
+  --repetitions 1 \
+  --provider openai \
+  --provider-model gpt-4.1-mini \
+  --provider-api-key-env-var OPENAI_API_KEY \
+  --provider-model-version gpt-4.1-mini \
+  --provider-api-version responses-v1 \
+  --provider-sdk-version <installed-openai-version> \
+  --provider-pricing-source-id openai-gpt-4-1-mini-docs-2026-05-06 \
+  --provider-model-docs-source-id openai-gpt-4-1-mini-docs-2026-05-06 \
+  --provider-pricing-snapshot-date 2026-05-06 \
+  --provider-currency USD \
+  --enable-live \
+  --max-model-requests 25 \
+  --max-run-seconds 300 \
+  --max-estimated-cost 1.00 \
+  --budget-input-cost-per-1m 0.40 \
+  --budget-output-cost-per-1m 1.60 \
+  --budget-currency USD \
   --out benchmarks/outputs
 ```
 
@@ -99,7 +137,9 @@ paired_delta_summary.json
 paired_uncertainty.json
 cache_cohorts.json
 failure_modes.json
+cost_estimates.json
 preflight.json
+warnings.json
 workload_regimes.json
 report.md
 ```
@@ -108,19 +148,32 @@ report.md
 is a normalized, redacted transcript view for inspecting model turns and tool
 activity. `summary.json`, `paired_deltas.json`, `pairing_coverage.json`,
 `paired_delta_summary.json`, `paired_uncertainty.json`, `cache_cohorts.json`,
-`failure_modes.json`, `preflight.json`, and `workload_regimes.json` are derived
-from the run results. `report.md` is presentation-only.
+`failure_modes.json`, `cost_estimates.json`, `preflight.json`, `warnings.json`,
+and `workload_regimes.json` are derived from the run results and run controls.
+`cost_estimates.json` uses measured token fields only when source-backed pricing
+metadata is present; otherwise rows are explicit `not_estimated` entries.
+`report.md` is presentation-only.
 
 `manifest.json` records the normalized arms, selected paired-delta baseline,
 arm-order seed, retry/concurrency/cache policy labels, claim scope,
 Python/platform metadata, git source metadata, benchmark protocol version/module
 hashes, protocol/evidence document hashes, optional integration package
-versions when installed, and SHA-256 checksums for the emitted artifact files.
+versions when installed, optional budget controls/estimates, and SHA-256
+checksums for the emitted artifact files.
 
 Optional provider settings can be recorded without credentials by passing
 `--provider`, `--provider-model`, and `--provider-dry-run`. Without
 `--provider-dry-run`, provider configs require `--enable-live` and pass SDK plus
-API-key environment checks before any run artifacts are created.
+API-key environment checks before any run artifacts are created. Live provider
+turns use provider-native tool-calling transcripts: OpenAI Responses API
+`function_call_output` items and Anthropic Messages API `tool_result` blocks.
+
+Optional budget guards can be set with `--max-run-seconds`,
+`--max-model-requests`, `--max-input-tokens`, `--max-output-tokens`, and
+`--max-estimated-cost`. Budget checks run before live provider validation and
+before artifact directories are created. Token and cost budgets use deterministic
+planning heuristics; pass `--budget-input-cost-per-1m`,
+`--budget-output-cost-per-1m`, and `--budget-currency` to source cost estimates.
 
 ## Interpreting Results
 
@@ -148,6 +201,6 @@ were skipped because a baseline row was missing.
 
 This benchmark does not yet support claims about live model quality, live
 provider cost, production MCP workloads, provider cache behavior, or general
-Code Mode superiority. Those claims require real provider adapters, a real Code
-Mode/Monty arm, filled source-register entries, and a predeclared sample-size
-and analysis protocol.
+Code Mode superiority. Those claims require a real Code Mode/Monty arm, filled
+source-register entries, live-run repetitions over a predeclared task/seed set,
+and an analysis protocol.

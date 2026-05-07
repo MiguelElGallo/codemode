@@ -8,16 +8,18 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from importlib import metadata
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
+from codemode_probe.costs import summarize_cost_estimates
 from codemode_probe.models import ArmResult, ProbeTask
 from codemode_probe.preflight import PreflightCheckResult
 from codemode_probe.provider_config import LiveProviderConfig
 from codemode_probe.prompts import render_prompt
 from codemode_probe.provenance import benchmark_protocol_metadata, git_source_metadata
 from codemode_probe.reporting import (
+    collect_run_warnings,
     render_summary_markdown,
     summarize_cache_cohorts,
     summarize_failure_modes,
@@ -29,6 +31,9 @@ from codemode_probe.reporting import (
     summarize_workload_regimes,
 )
 from codemode_probe.suite import BenchmarkSuiteConfig
+
+if TYPE_CHECKING:
+    from codemode_probe.budget import RunBudgetConfig, RunBudgetEstimate
 
 SCHEMA_VERSION = 1
 DEFAULT_PAIRED_BASELINE_ARM = "direct_mcp_agent_parallel"
@@ -68,6 +73,8 @@ def write_run_artifacts(
     suite_config: BenchmarkSuiteConfig | None = None,
     preflight_results: list[PreflightCheckResult] | None = None,
     provider_config: LiveProviderConfig | None = None,
+    budget_config: RunBudgetConfig | None = None,
+    budget_estimate: RunBudgetEstimate | None = None,
 ) -> None:
     manifest = {
         "schema_version": SCHEMA_VERSION,
@@ -91,6 +98,22 @@ def write_run_artifacts(
         paired_baseline_arm = suite_config.normalized_paired_baseline_arm
     if provider_config is not None:
         manifest["provider"] = provider_config.model_dump(mode="json")
+    if budget_config is not None:
+        manifest["budget"] = {
+            "config": budget_config.model_dump(mode="json"),
+            "estimate": (
+                budget_estimate.model_dump(mode="json")
+                if budget_estimate is not None
+                else None
+            ),
+        }
+    warnings = collect_run_warnings(
+        results,
+        provider_config=provider_config,
+        suite_config=suite_config,
+        preflight_results=preflight_results,
+        paired_baseline_arm=paired_baseline_arm,
+    )
     _write_json(run_dir / "tasks.resolved.json", [task.model_dump(mode="json") for task in tasks])
     _write_json(
         run_dir / "prompts.resolved.json",
@@ -113,9 +136,22 @@ def write_run_artifacts(
     _write_json(run_dir / "workload_regimes.json", summarize_workload_regimes(tasks, results))
     _write_json(run_dir / "cache_cohorts.json", summarize_cache_cohorts(results))
     _write_json(run_dir / "failure_modes.json", summarize_failure_modes(results))
+    _write_json(
+        run_dir / "cost_estimates.json",
+        summarize_cost_estimates(
+            results,
+            provider_config=provider_config,
+            budget_config=budget_config,
+        ),
+    )
     _write_json(run_dir / "preflight.json", _preflight_payload(preflight_results))
+    _write_json(run_dir / "warnings.json", warnings)
     (run_dir / "report.md").write_text(
-        render_summary_markdown(results, paired_baseline_arm=paired_baseline_arm),
+        render_summary_markdown(
+            results,
+            paired_baseline_arm=paired_baseline_arm,
+            warnings=warnings,
+        ),
         encoding="utf-8",
     )
     manifest["artifacts"] = _artifact_hashes(run_dir)

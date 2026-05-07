@@ -17,6 +17,7 @@ README = REPO_ROOT / "README.md"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 BENCHMARK_PROTOCOL = REPO_ROOT / "docs" / "benchmark_protocol.md"
 EVIDENCE_REGISTER = REPO_ROOT / "docs" / "evidence_register.md"
+TOMORROW_RUN_CHECKLIST = REPO_ROOT / "docs" / "tomorrow_run_checklist.md"
 
 
 def _readme_fenced_blocks(language: str) -> list[str]:
@@ -53,6 +54,7 @@ def test_readme_cli_snippets_parse_and_delegate_to_benchmark_suite(
     def fake_run_benchmark_suite(
         tasks: list[ProbeTask],
         config: BenchmarkSuiteConfig,
+        **kwargs,
     ) -> list[object]:
         captured.append(
             {
@@ -157,8 +159,10 @@ def test_readme_links_protocol_and_evidence_register() -> None:
 
     assert "[docs/benchmark_protocol.md](docs/benchmark_protocol.md)" in readme
     assert "[docs/evidence_register.md](docs/evidence_register.md)" in readme
+    assert "[docs/tomorrow_run_checklist.md](docs/tomorrow_run_checklist.md)" in readme
     assert BENCHMARK_PROTOCOL.is_file()
     assert EVIDENCE_REGISTER.is_file()
+    assert TOMORROW_RUN_CHECKLIST.is_file()
 
 
 def test_protocol_doc_declares_current_claim_boundaries() -> None:
@@ -173,9 +177,10 @@ def test_protocol_doc_declares_current_claim_boundaries() -> None:
 def test_evidence_register_has_required_columns() -> None:
     evidence = EVIDENCE_REGISTER.read_text(encoding="utf-8")
 
-    assert "| Claim | Source URL | Retrieved At | Version/Date | Used By | Notes |" in evidence
-    assert "Provider pricing" in evidence
-    assert "Code Mode/Monty docs" in evidence
+    assert "| ID | Claim | Source URL | Retrieved At | Version/Date | Used By | Notes |" in evidence
+    assert "openai-gpt-4-1-mini-docs-2026-05-06" in evidence
+    assert "openai-responses-function-calling-2026-05-06" in evidence
+    assert "pydantic-code-mode-docs-2026-05-06" in evidence
 
 
 def test_readme_setup_command_matches_ci_test_command() -> None:

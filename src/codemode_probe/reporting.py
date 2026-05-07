@@ -3,8 +3,14 @@ from __future__ import annotations
 import math
 import random
 from statistics import median
+from typing import TYPE_CHECKING
 
 from codemode_probe.models import ArmResult, ProbeTask
+
+if TYPE_CHECKING:
+    from codemode_probe.preflight import PreflightCheckResult
+    from codemode_probe.provider_config import LiveProviderConfig
+    from codemode_probe.suite import BenchmarkSuiteConfig
 
 
 def summarize_results(results: list[ArmResult]) -> dict[str, object]:
@@ -22,6 +28,7 @@ def render_summary_markdown(
     results: list[ArmResult],
     *,
     paired_baseline_arm: str = "direct_mcp_agent_parallel",
+    warnings: list[dict[str, object]] | None = None,
 ) -> str:
     summary = summarize_results(results)
     lines = [
@@ -60,7 +67,170 @@ def render_summary_markdown(
             "",
         ]
     )
+    if warnings:
+        lines.extend(["## Warnings", ""])
+        for warning in warnings:
+            lines.append(
+                f"- `{warning['id']}` ({warning['severity']}): {warning['message']}"
+            )
+        lines.append("")
     return "\n".join(lines)
+
+
+def collect_run_warnings(
+    results: list[ArmResult],
+    *,
+    provider_config: LiveProviderConfig | None = None,
+    suite_config: BenchmarkSuiteConfig | None = None,
+    preflight_results: list[PreflightCheckResult] | None = None,
+    paired_baseline_arm: str = "direct_mcp_agent_parallel",
+) -> list[dict[str, object]]:
+    warnings: list[dict[str, object]] = []
+
+    def add(
+        warning_id: str,
+        severity: str,
+        message: str,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        warnings.append(
+            {
+                "id": warning_id,
+                "severity": severity,
+                "message": message,
+                "details": details or {},
+            }
+        )
+
+    if provider_config is None:
+        add(
+            "synthetic_harness_validation",
+            "info",
+            "No live provider config was supplied; claims are limited to synthetic harness validation.",
+        )
+    elif not provider_config.enabled:
+        add(
+            "dry_run_provider_config",
+            "warning",
+            "Provider config was recorded in dry-run mode; no live provider calls were made.",
+            {"provider": provider_config.provider.value, "model": provider_config.model},
+        )
+
+    if provider_config is not None:
+        model_evidence_fields = (
+            "model_version",
+            "api_version",
+            "sdk_version",
+            "model_docs_source_id",
+        )
+        missing_model_fields = [
+            field for field in model_evidence_fields if getattr(provider_config, field) is None
+        ]
+        if missing_model_fields:
+            add(
+                "missing_provider_model_evidence",
+                "warning",
+                "Provider config is missing model/API/SDK evidence fields.",
+                {"missing_fields": missing_model_fields},
+            )
+
+        pricing_fields = (
+            "pricing_source_id",
+            "pricing_snapshot_date",
+            "currency",
+        )
+        missing_pricing_fields = [
+            field for field in pricing_fields if getattr(provider_config, field) is None
+        ]
+        if missing_pricing_fields:
+            add(
+                "missing_provider_pricing_evidence",
+                "warning",
+                "Provider config is missing pricing evidence fields; cost claims are not source-backed.",
+                {"missing_fields": missing_pricing_fields},
+            )
+
+    if preflight_results is None:
+        add(
+            "preflight_not_run",
+            "warning",
+            "Preflight checks were skipped or unavailable for this artifact set.",
+        )
+    else:
+        failed_preflight = [result.name for result in preflight_results if not result.passed]
+        if failed_preflight:
+            add(
+                "preflight_failed",
+                "error",
+                "One or more preflight checks failed.",
+                {"failed_checks": failed_preflight},
+            )
+
+    if suite_config is None:
+        add(
+            "suite_config_missing",
+            "warning",
+            "No suite config was recorded; repetition and arm-order controls are unspecified.",
+        )
+    else:
+        if suite_config.repetitions < 3:
+            add(
+                "low_repetition_count",
+                "warning",
+                "Run has fewer than 3 repetitions; treat comparisons as exploratory.",
+                {"repetitions": suite_config.repetitions},
+            )
+        if provider_config is not None and provider_config.enabled and suite_config.arm_order == "fixed":
+            add(
+                "fixed_arm_order_live_provider",
+                "warning",
+                "Live-provider run uses fixed arm order; latency comparisons may include ordering bias.",
+                {"arm_order": suite_config.arm_order},
+            )
+
+    if any(result.cache_warmup_run for result in results):
+        add(
+            "cache_warmup_rows_present",
+            "info",
+            "Cache warmup rows are present and should be excluded from warm-cache effect estimates.",
+        )
+
+    pairing = summarize_pairing_coverage(results, baseline_arm=paired_baseline_arm)
+    if pairing["unpaired_comparisons_total"]:
+        add(
+            "unpaired_comparisons",
+            "warning",
+            "Some comparison rows could not be paired with the configured baseline arm.",
+            {
+                "baseline_arm": pairing["baseline_arm"],
+                "unpaired_comparisons_total": pairing["unpaired_comparisons_total"],
+            },
+        )
+    if pairing["duplicate_trial_arm_groups"]:
+        add(
+            "duplicate_trial_arm_groups",
+            "warning",
+            "Duplicate arm rows were found for one or more trial keys.",
+            {"duplicate_trial_arm_groups": pairing["duplicate_trial_arm_groups"]},
+        )
+
+    failure_rows = summarize_failure_modes(results)
+    if failure_rows:
+        add(
+            "run_failures_present",
+            "error",
+            "One or more runs failed schema, execution, scoring, or timeout checks.",
+            {"failure_mode_count": len(failure_rows)},
+        )
+    if any(result.timed_out for result in results):
+        add(
+            "timeouts_present",
+            "error",
+            "One or more runs timed out.",
+            {"timed_out_runs": sum(1 for result in results if result.timed_out)},
+        )
+
+    return sorted(warnings, key=lambda warning: str(warning["id"]))
 
 
 def summarize_paired_deltas(

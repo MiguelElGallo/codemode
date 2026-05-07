@@ -16,7 +16,10 @@ from codemode_probe.models import (
     TraceSummary,
     UsageStats,
 )
+from codemode_probe.preflight import PreflightCheckResult
+from codemode_probe.provider_config import openai_config
 from codemode_probe.reporting import (
+    collect_run_warnings,
     render_summary_markdown,
     summarize_cache_cohorts,
     summarize_failure_modes,
@@ -841,6 +844,106 @@ def test_render_summary_markdown_is_deterministic_and_includes_caveats() -> None
     )
 
 
+def test_render_summary_markdown_includes_warning_section_when_supplied() -> None:
+    report = render_summary_markdown(
+        [_result("arm-a")],
+        warnings=[
+            {
+                "id": "low_repetition_count",
+                "severity": "warning",
+                "message": "Run has fewer than 3 repetitions.",
+                "details": {},
+            }
+        ],
+    )
+
+    assert "## Warnings" in report
+    assert (
+        "- `low_repetition_count` (warning): Run has fewer than 3 repetitions."
+        in report
+    )
+
+
+def test_collect_run_warnings_flags_claim_readiness_gaps() -> None:
+    warnings = collect_run_warnings(
+        [
+            _result(
+                "code_mode_synthetic_scripted",
+                cache_warmup_run=True,
+                timed_out=True,
+                error="timeout",
+                failure_category=FailureCategory.TIMEOUT,
+            )
+        ],
+        provider_config=openai_config(model="gpt-test", enabled=False),
+        suite_config=BenchmarkSuiteConfig(
+            arms=("code_mode",),
+            repetitions=1,
+            arm_order="fixed",
+        ),
+        preflight_results=None,
+        paired_baseline_arm="direct_mcp_agent_parallel",
+    )
+
+    by_id = {warning["id"]: warning for warning in warnings}
+
+    assert set(by_id) == {
+        "cache_warmup_rows_present",
+        "dry_run_provider_config",
+        "low_repetition_count",
+        "missing_provider_model_evidence",
+        "missing_provider_pricing_evidence",
+        "preflight_not_run",
+        "run_failures_present",
+        "timeouts_present",
+        "unpaired_comparisons",
+    }
+    assert by_id["missing_provider_model_evidence"]["details"] == {
+        "missing_fields": [
+            "model_version",
+            "api_version",
+            "sdk_version",
+            "model_docs_source_id",
+        ]
+    }
+    assert by_id["missing_provider_pricing_evidence"]["details"] == {
+        "missing_fields": [
+            "pricing_source_id",
+            "pricing_snapshot_date",
+            "currency",
+        ]
+    }
+
+
+def test_collect_run_warnings_stays_empty_for_ready_synthetic_suite() -> None:
+    warnings = collect_run_warnings(
+        [
+            _result(
+                "direct_mcp_agent_parallel",
+                task_id="task-1",
+                repetition=1,
+                trial_id="trial-1",
+            ),
+            _result(
+                "code_mode_synthetic_scripted",
+                task_id="task-1",
+                repetition=1,
+                trial_id="trial-1",
+            ),
+        ],
+        suite_config=BenchmarkSuiteConfig(
+            arms=("direct_agent", "code_mode"),
+            repetitions=3,
+            arm_order="randomized",
+        ),
+        preflight_results=[
+            PreflightCheckResult(name="preflight-a", passed=True, details={})
+        ],
+    )
+
+    assert [warning["id"] for warning in warnings] == ["synthetic_harness_validation"]
+
+
 def test_write_run_artifacts_writes_report_without_replacing_summary_or_results(
     tmp_path: Path,
 ) -> None:
@@ -877,6 +980,15 @@ def test_write_run_artifacts_writes_report_without_replacing_summary_or_results(
         for line in (tmp_path / "results.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert [row["arm_name"] for row in jsonl_rows] == ["arm-a"]
+
+    warnings = json.loads((tmp_path / "warnings.json").read_text(encoding="utf-8"))
+    assert [warning["id"] for warning in warnings] == [
+        "preflight_not_run",
+        "suite_config_missing",
+        "synthetic_harness_validation",
+        "unpaired_comparisons",
+    ]
+    assert "## Warnings" in (tmp_path / "report.md").read_text(encoding="utf-8")
 
 
 def test_write_run_artifacts_writes_paired_deltas_with_direct_mcp_parallel_baseline(

@@ -22,6 +22,7 @@ def test_smoke_preset_shape() -> None:
     assert task.workload.candidates_per_shard == 1
     assert task.workload.top_k == 1
     assert task.workload.seed == 10 + len("smoke_single_lookup")
+    assert task.max_tool_calls == 2
 
 
 def test_orchestration_matrix_task_ids_families_tool_shapes_and_sizes() -> None:

@@ -10,6 +10,7 @@ from codemode_probe.executor_factory import (
 from codemode_probe.executors import CodeModeSyntheticScriptedExecutor
 from codemode_probe.models import ProbeTask, ToolShape
 from codemode_probe.oracle import rank_candidates
+from codemode_probe.provider import ProviderTurnResponse
 from codemode_probe.reporting import summarize_paired_deltas
 from codemode_probe.runner import BenchmarkRunner
 from codemode_probe.suite import BenchmarkSuiteConfig, run_benchmark_suite
@@ -72,6 +73,37 @@ def test_build_executor_returns_fresh_direct_mcp_state_for_each_build(
     assert len(second.execution.tool_calls) == expected_tool_calls
     assert first.score.top_k_overlap == 1.0
     assert second.score.top_k_overlap == 1.0
+
+
+def test_build_executor_can_inject_provider_client_for_direct_agent() -> None:
+    class FakeProviderClient:
+        provider_name = "fake-provider"
+        model_name = "fake-model"
+
+        async def run_provider_turn(self, request):
+            return ProviderTurnResponse(
+                final_answer={"task_id": request.rendered_prompt.task_id, "candidates": []},
+                stop_reason="final_answer",
+                raw={"request_id": "fake-request"},
+            )
+
+    task = tiny_task(tool_shape=ToolShape.BATCH)
+
+    result = BenchmarkRunner(
+        build_executor(
+            "direct_agent",
+            task,
+            provider_client=FakeProviderClient(),
+        )
+    ).run_task(task)
+
+    assert result.arm_name == "direct_mcp_agent_parallel"
+    assert result.execution.error is None
+    assert result.execution.raw["model_turns"][0]["provider_name"] == "fake-provider"
+    assert result.execution.raw["model_turns"][0]["model_name"] == "fake-model"
+    assert result.execution.raw["model_turns"][0]["provider_raw"] == {
+        "request_id": "fake-request"
+    }
 
 
 @pytest.mark.parametrize("tool_shape", [ToolShape.SCALAR, ToolShape.BATCH])

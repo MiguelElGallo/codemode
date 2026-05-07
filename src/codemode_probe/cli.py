@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date
 from pathlib import Path
 
 from codemode_probe.artifacts import create_run_dir, write_run_artifacts
+from codemode_probe.budget import RunBudgetConfig, enforce_run_budget
 from codemode_probe.cases import CaseMatrixConfig, generate_case_tasks
-from codemode_probe.executor_factory import available_executor_ids
+from codemode_probe.executor_ids import available_executor_ids
 from codemode_probe.models import CachePolicy, ProbeTask, TaskFamily, ToolShape
-from codemode_probe.preflight import run_preflight_checks
 from codemode_probe.provider_config import LiveProvider, LiveProviderConfig
 from codemode_probe.suite import BenchmarkSuiteConfig, run_benchmark_suite
 from codemode_probe.workload import make_probe_task
@@ -97,6 +98,13 @@ def main() -> None:
         default=0.0,
         help="Temperature recorded for the optional live provider config.",
     )
+    parser.add_argument("--provider-model-version", default=None)
+    parser.add_argument("--provider-api-version", default=None)
+    parser.add_argument("--provider-sdk-version", default=None)
+    parser.add_argument("--provider-pricing-source-id", default=None)
+    parser.add_argument("--provider-model-docs-source-id", default=None)
+    parser.add_argument("--provider-pricing-snapshot-date", type=date.fromisoformat, default=None)
+    parser.add_argument("--provider-currency", default=None)
     parser.add_argument(
         "--provider-dry-run",
         action="store_true",
@@ -107,17 +115,18 @@ def main() -> None:
         action="store_true",
         help="Allow live provider validation.",
     )
+    parser.add_argument("--max-run-seconds", type=float, default=None)
+    parser.add_argument("--max-model-requests", type=int, default=None)
+    parser.add_argument("--max-input-tokens", type=int, default=None)
+    parser.add_argument("--max-output-tokens", type=int, default=None)
+    parser.add_argument("--max-estimated-cost", type=float, default=None)
+    parser.add_argument("--budget-input-cost-per-1m", type=float, default=None)
+    parser.add_argument("--budget-output-cost-per-1m", type=float, default=None)
+    parser.add_argument("--budget-currency", default=None)
     args = parser.parse_args()
 
     provider_config = _provider_config_from_args(args)
-    if provider_config is not None and not args.provider_dry_run:
-        provider_config.validate_for_live_use()
-
-    preflight_results = None if args.skip_preflight else run_preflight_checks()
-    if preflight_results is not None and not all(result.passed for result in preflight_results):
-        failed = ", ".join(result.name for result in preflight_results if not result.passed)
-        raise RuntimeError(f"preflight checks failed: {failed}")
-
+    provider_client = None
     tasks = _tasks_from_args(args)
     arms = [arm.strip() for arm in args.arms.split(",") if arm.strip()]
     suite_config = BenchmarkSuiteConfig(
@@ -131,8 +140,28 @@ def main() -> None:
         cache_warmup_repetitions=args.cache_warmup_repetitions,
     )
     suite_config.validate_arms()
+    budget_config = _budget_config_from_args(args)
+    budget_estimate = enforce_run_budget(tasks, suite_config, budget_config)
+
+    if provider_config is not None and not args.provider_dry_run:
+        provider_config.validate_for_live_use()
+        provider_client = build_provider_client(provider_config)
+
+    preflight_results = None if args.skip_preflight else run_preflight_checks()
+    if preflight_results is not None and not all(result.passed for result in preflight_results):
+        failed = ", ".join(result.name for result in preflight_results if not result.passed)
+        raise RuntimeError(f"preflight checks failed: {failed}")
+
     run_dir = create_run_dir(args.out, run_id=args.run_id)
-    results = run_benchmark_suite(tasks, suite_config)
+    results = run_benchmark_suite(
+        tasks,
+        suite_config,
+        executor_factory=lambda arm, task: build_executor(
+            arm,
+            task,
+            provider_client=provider_client,
+        ),
+    )
 
     write_run_artifacts(
         run_dir,
@@ -141,6 +170,8 @@ def main() -> None:
         suite_config=suite_config,
         preflight_results=preflight_results,
         provider_config=provider_config,
+        budget_config=budget_config,
+        budget_estimate=budget_estimate,
     )
     print(run_dir)
 
@@ -197,7 +228,46 @@ def _provider_config_from_args(args: argparse.Namespace) -> LiveProviderConfig |
         api_key_env_var=args.provider_api_key_env_var or default_env_var,
         timeout_seconds=args.provider_timeout_seconds,
         temperature=args.provider_temperature,
+        model_version=args.provider_model_version,
+        api_version=args.provider_api_version,
+        sdk_version=args.provider_sdk_version,
+        pricing_source_id=args.provider_pricing_source_id,
+        model_docs_source_id=args.provider_model_docs_source_id,
+        pricing_snapshot_date=args.provider_pricing_snapshot_date,
+        currency=args.provider_currency,
     )
+
+
+def _budget_config_from_args(args: argparse.Namespace) -> RunBudgetConfig | None:
+    config = RunBudgetConfig(
+        max_run_seconds=args.max_run_seconds,
+        max_model_requests=args.max_model_requests,
+        max_input_tokens=args.max_input_tokens,
+        max_output_tokens=args.max_output_tokens,
+        max_estimated_cost=args.max_estimated_cost,
+        input_cost_per_1m_tokens=args.budget_input_cost_per_1m,
+        output_cost_per_1m_tokens=args.budget_output_cost_per_1m,
+        currency=args.budget_currency,
+    )
+    return config if config.is_configured else None
+
+
+def build_executor(arm: str, task: ProbeTask, *, provider_client: object | None = None):
+    from codemode_probe.executor_factory import build_executor as _build_executor
+
+    return _build_executor(arm, task, provider_client=provider_client)
+
+
+def build_provider_client(provider_config: LiveProviderConfig):
+    from codemode_probe.provider_adapters import build_provider_client as _build_provider_client
+
+    return _build_provider_client(provider_config)
+
+
+def run_preflight_checks():
+    from codemode_probe.preflight import run_preflight_checks as _run_preflight_checks
+
+    return _run_preflight_checks()
 
 
 if __name__ == "__main__":

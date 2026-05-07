@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Callable
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from codemode_probe.executor_factory import available_executor_ids, build_executor, normalize_executor_id
+from codemode_probe.executor_ids import available_executor_ids, normalize_executor_id
+from codemode_probe.executors import CandidateExecutor
 from codemode_probe.models import ArmResult, CachePolicy, CacheState, ExecutionContext, ProbeTask
 from codemode_probe.runner import BenchmarkRunner
 
 ArmOrder = Literal["fixed", "randomized"]
+ExecutorFactory = Callable[[str, ProbeTask], CandidateExecutor]
 
 
 class BenchmarkSuiteConfig(BaseModel):
@@ -46,11 +49,15 @@ class BenchmarkSuiteConfig(BaseModel):
 def run_benchmark_suite(
     tasks: list[ProbeTask],
     config: BenchmarkSuiteConfig,
+    *,
+    executor_factory: ExecutorFactory | None = None,
 ) -> list[ArmResult]:
     results: list[ArmResult] = []
     rng = random.Random(config.random_seed)
     config.validate_arms()
     normalized_arms = config.normalized_arms
+    if executor_factory is None:
+        executor_factory = build_executor
 
     for repetition in range(1, config.repetitions + 1):
         for task in tasks:
@@ -67,7 +74,7 @@ def run_benchmark_suite(
                 cache_warmup_run=cache_state == CacheState.WARMUP,
             )
             for arm_order_index, arm in enumerate(arms):
-                executor = build_executor(arm, task)
+                executor = executor_factory(arm, task)
                 result = BenchmarkRunner(executor).run_task(
                     task,
                     repetition=repetition,
@@ -111,3 +118,9 @@ def _cache_state_for_repetition(
             return CacheState.WARMUP
         return CacheState.WARM
     return CacheState.UNSPECIFIED
+
+
+def build_executor(arm: str, task: ProbeTask) -> CandidateExecutor:
+    from codemode_probe.executor_factory import build_executor as _build_executor
+
+    return _build_executor(arm, task)

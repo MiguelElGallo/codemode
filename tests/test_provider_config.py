@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import tomllib
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,13 @@ def test_openai_config_defaults_to_disabled_live_provider() -> None:
     assert config.timeout_seconds == 60.0
     assert config.temperature == 0.0
     assert config.sdk_package == "openai"
+    assert config.model_version is None
+    assert config.api_version is None
+    assert config.sdk_version is None
+    assert config.pricing_source_id is None
+    assert config.model_docs_source_id is None
+    assert config.pricing_snapshot_date is None
+    assert config.currency is None
 
 
 def test_anthropic_config_defaults_to_disabled_live_provider() -> None:
@@ -40,6 +48,42 @@ def test_anthropic_config_defaults_to_disabled_live_provider() -> None:
     assert config.timeout_seconds == 60.0
     assert config.temperature == 0.0
     assert config.sdk_package == "anthropic"
+    assert config.model_version is None
+    assert config.api_version is None
+    assert config.sdk_version is None
+    assert config.pricing_source_id is None
+    assert config.model_docs_source_id is None
+    assert config.pricing_snapshot_date is None
+    assert config.currency is None
+
+
+def test_provider_config_serializes_reproducibility_evidence_fields() -> None:
+    config = openai_config(
+        model="gpt-test",
+        model_version="2026-04-01",
+        api_version="responses-v1",
+        sdk_version="2.9.0",
+        pricing_source_id="openai-pricing-2026-05-06",
+        model_docs_source_id="openai-model-docs-2026-05-06",
+        pricing_snapshot_date=date(2026, 5, 6),
+        currency="USD",
+    )
+
+    assert config.model_dump(mode="json") == {
+        "provider": "openai",
+        "model": "gpt-test",
+        "enabled": False,
+        "api_key_env_var": "OPENAI_API_KEY",
+        "timeout_seconds": 60.0,
+        "temperature": 0.0,
+        "model_version": "2026-04-01",
+        "api_version": "responses-v1",
+        "sdk_version": "2.9.0",
+        "pricing_source_id": "openai-pricing-2026-05-06",
+        "model_docs_source_id": "openai-model-docs-2026-05-06",
+        "pricing_snapshot_date": "2026-05-06",
+        "currency": "USD",
+    }
 
 
 def test_disabled_live_config_errors_before_sdk_or_env_checks(monkeypatch: pytest.MonkeyPatch) -> None:

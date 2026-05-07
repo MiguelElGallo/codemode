@@ -157,6 +157,50 @@ def test_suite_randomized_order_is_deterministic_by_seed(
     ]
 
 
+def test_suite_accepts_explicit_executor_factory_without_monkeypatching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class FakeRunner:
+        def __init__(self, executor: SimpleNamespace) -> None:
+            self.executor = executor
+
+        def run_task(
+            self,
+            task: ProbeTask,
+            *,
+            repetition: int = 1,
+            context=None,
+        ) -> SimpleNamespace:
+            return FakeArmResult(
+                task_id=task.id,
+                arm_name=self.executor.name,
+                repetition=repetition,
+            )
+
+    def fake_executor_factory(arm: str, task: ProbeTask) -> SimpleNamespace:
+        calls.append((arm, task.id))
+        return SimpleNamespace(name=f"fake-{arm}")
+
+    monkeypatch.setattr(suite, "BenchmarkRunner", FakeRunner)
+
+    results = run_benchmark_suite(
+        [tiny_task("factory-suite", seed=1)],
+        BenchmarkSuiteConfig(arms=("direct_agent", "code_mode")),
+        executor_factory=fake_executor_factory,
+    )
+
+    assert calls == [
+        ("direct_mcp_agent_parallel", "factory-suite"),
+        ("code_mode_synthetic_scripted", "factory-suite"),
+    ]
+    assert [result.arm_name for result in results] == [
+        "fake-direct_mcp_agent_parallel",
+        "fake-code_mode_synthetic_scripted",
+    ]
+
+
 def test_suite_records_trial_identity_and_arm_execution_order() -> None:
     task = tiny_task("trial-task", seed=1)
 
