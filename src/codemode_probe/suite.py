@@ -44,6 +44,47 @@ class BenchmarkSuiteConfig(BaseModel):
             raise ValueError(
                 f"unknown paired baseline executor id: {self.paired_baseline_arm}"
             )
+        self._validate_cache_controls()
+
+    def _validate_cache_controls(self) -> None:
+        if self.cache_policy in {CachePolicy.UNSPECIFIED, CachePolicy.DISABLED}:
+            if self.cache_warmup_repetitions != 0:
+                raise ValueError(
+                    "cache_warmup_repetitions requires warm or cold_then_warm cache policy"
+                )
+            return
+
+        if self.cache_policy == CachePolicy.COLD:
+            if self.cache_warmup_repetitions != 0:
+                raise ValueError(
+                    "cache_warmup_repetitions requires warm or cold_then_warm cache policy"
+                )
+            if self.repetitions != 1:
+                raise ValueError(
+                    "cold cache policy requires exactly one repetition unless cache busting is explicitly implemented"
+                )
+            return
+
+        if self.cache_policy == CachePolicy.WARM:
+            if self.cache_warmup_repetitions == 0:
+                raise ValueError(
+                    "warm cache policy requires at least one warmup repetition"
+                )
+            if self.cache_warmup_repetitions >= self.repetitions:
+                raise ValueError(
+                    "warm cache policy must leave at least one measured warm repetition"
+                )
+            return
+
+        if self.cache_policy == CachePolicy.COLD_THEN_WARM:
+            if self.repetitions < 2:
+                raise ValueError(
+                    "cold_then_warm cache policy requires at least two repetitions"
+                )
+            if self.cache_warmup_repetitions >= self.repetitions - 1:
+                raise ValueError(
+                    "cold_then_warm cache policy must leave at least one measured warm repetition after cold and warmup rows"
+                )
 
 
 def run_benchmark_suite(

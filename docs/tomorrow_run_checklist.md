@@ -28,7 +28,7 @@ source-backed external evidence.
 
 ```bash
 export AZURE_OPENAI_API_KEY=...
-export AZURE_OPENAI_ENDPOINT="https://foundry-argus.cognitiveservices.azure.com/"
+export AZURE_OPENAI_ENDPOINT="https://<resource>.cognitiveservices.azure.com/openai/deployments/<deployment>/chat/completions?api-version=2025-01-01-preview"
 ```
 
 Do not put API keys in CLI arguments, config files, artifacts, or commit
@@ -39,6 +39,8 @@ safe path is to keep secrets only in environment variables.
 
 Replace placeholders before running.
 `--provider-model` is the Azure OpenAI deployment name, not the base model name.
+The endpoint may be either the resource base URL or the full deployment
+chat-completions URL from Azure AI Foundry.
 
 ```bash
 uv run --extra providers python -m codemode_probe.cli \
@@ -50,7 +52,7 @@ uv run --extra providers python -m codemode_probe.cli \
   --provider-api-key-env-var AZURE_OPENAI_API_KEY \
   --provider-endpoint-env-var AZURE_OPENAI_ENDPOINT \
   --provider-model-version gpt-4.1-mini \
-  --provider-api-version 2024-12-01-preview \
+  --provider-api-version 2025-01-01-preview \
   --provider-sdk-version <installed-openai-version> \
   --provider-pricing-source-id openai-gpt-4-1-mini-docs-2026-05-06 \
   --provider-model-docs-source-id openai-gpt-4-1-mini-docs-2026-05-06 \

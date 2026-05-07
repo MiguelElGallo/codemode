@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import importlib
 import json
 import os
 from typing import Any, Protocol
+from urllib.parse import parse_qs, urlparse
 
 from codemode_probe.models import NormalizedModelUsage, NormalizedToolRequest
 from codemode_probe.provider import ProviderClient, ProviderTurnRequest, ProviderTurnResponse
@@ -17,6 +19,13 @@ class ProviderAdapterError(ValueError):
 class ProviderTransport(Protocol):
     async def send_turn(self, payload: dict[str, Any]) -> dict[str, Any]:
         ...
+
+
+@dataclass(frozen=True)
+class AzureEndpointSettings:
+    base_endpoint: str
+    api_version: str | None
+    chat_deployment: str | None = None
 
 
 def build_provider_client(
@@ -51,6 +60,12 @@ class OpenAIProviderClient:
 
 class AzureOpenAIProviderClient(OpenAIProviderClient):
     provider_name = "azure_openai"
+
+    async def run_provider_turn(self, request: ProviderTurnRequest) -> ProviderTurnResponse:
+        response = await self._transport.send_turn(_provider_payload(self._config, request))
+        if "choices" in response:
+            return _normalize_openai_chat_completion_response(response)
+        return _normalize_openai_response(response)
 
 
 class AnthropicProviderClient:
@@ -124,14 +139,54 @@ class AzureOpenAISdkTransport(OpenAISdkTransport):
             raise ProviderConfigError(
                 "optional SDK package 'openai' does not expose AsyncAzureOpenAI"
             )
-        if not config.api_version:
+        endpoint = _azure_endpoint_settings(_endpoint(config), config.api_version)
+        if not endpoint.api_version:
             raise ProviderConfigError("Azure OpenAI requires provider api_version")
+        self._chat_deployment = endpoint.chat_deployment
         self._client = async_client(
             api_key=_api_key(config),
-            azure_endpoint=_endpoint(config),
-            api_version=config.api_version,
+            azure_endpoint=endpoint.base_endpoint,
+            api_version=endpoint.api_version,
             timeout=config.timeout_seconds,
         )
+
+    async def send_turn(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._chat_deployment is None:
+            return await super().send_turn(payload)
+
+        task_id = _task_id(payload)
+        state = self._state.get(task_id)
+        if state is None or _is_initial_turn(payload):
+            state = {
+                "messages": [{"role": "user", "content": _instruction_text(payload)}],
+                "seen_tool_result_ids": set(),
+            }
+            self._state[task_id] = state
+        messages = list(state["messages"])
+        tool_messages = _openai_chat_tool_messages(
+            payload,
+            seen_tool_result_ids=state["seen_tool_result_ids"],
+        )
+        sent_tool_result_ids = {
+            str(message["tool_call_id"])
+            for message in tool_messages
+            if message.get("tool_call_id") is not None
+        }
+        messages.extend(tool_messages)
+        request_kwargs: dict[str, Any] = {
+            "model": self._chat_deployment,
+            "messages": messages,
+            "tools": _openai_chat_tools(payload),
+            "temperature": self._config.temperature,
+        }
+
+        response = await self._client.chat.completions.create(**request_kwargs)
+        response_dict = _response_dict(response)
+        state["seen_tool_result_ids"].update(sent_tool_result_ids)
+        assistant_message = _openai_chat_assistant_message(response_dict)
+        if assistant_message is not None:
+            state["messages"] = [*messages, assistant_message]
+        return response_dict
 
 
 class AnthropicSdkTransport:
@@ -237,6 +292,29 @@ def _endpoint(config: LiveProviderConfig) -> str:
     return value
 
 
+def _azure_endpoint_settings(endpoint: str, api_version: str | None) -> AzureEndpointSettings:
+    parsed = urlparse(endpoint)
+    if not parsed.scheme or not parsed.netloc:
+        raise ProviderConfigError("Azure OpenAI endpoint must be an absolute URL")
+
+    parts = [part for part in parsed.path.split("/") if part]
+    chat_deployment: str | None = None
+    if len(parts) >= 5 and parts[:2] == ["openai", "deployments"]:
+        if parts[3:5] == ["chat", "completions"]:
+            chat_deployment = parts[2]
+        else:
+            raise ProviderConfigError(
+                "Azure OpenAI deployment endpoint must end with /chat/completions"
+            )
+    query_api_version = parse_qs(parsed.query).get("api-version", [None])[0]
+    base_endpoint = f"{parsed.scheme}://{parsed.netloc}/"
+    return AzureEndpointSettings(
+        base_endpoint=base_endpoint,
+        api_version=api_version or query_api_version,
+        chat_deployment=chat_deployment,
+    )
+
+
 def _instruction_text(payload: dict[str, Any]) -> str:
     prompt = _dict(payload.get("prompt", {}))
     return "\n".join(
@@ -303,6 +381,65 @@ def _openai_tool_outputs(
             }
         )
     return outputs
+
+
+def _openai_chat_tools(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": _tool_parameters(tool["name"]),
+            },
+        }
+        for tool in _tool_specs(payload)
+    ]
+
+
+def _openai_chat_tool_messages(
+    payload: dict[str, Any],
+    *,
+    seen_tool_result_ids: set[str],
+) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = []
+    for tool_result in _tool_results(payload):
+        request = _dict(tool_result.get("request", {}))
+        call_id = request.get("id")
+        if call_id is None:
+            continue
+        call_id_text = str(call_id)
+        if call_id_text in seen_tool_result_ids:
+            continue
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": call_id_text,
+                "content": json.dumps(
+                    tool_result.get("result")
+                    if tool_result.get("error") is None
+                    else {"error": tool_result.get("error")},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            }
+        )
+    return messages
+
+
+def _openai_chat_assistant_message(response: dict[str, Any]) -> dict[str, Any] | None:
+    choice = _first_chat_choice(response)
+    if choice is None:
+        return None
+    message = _dict(choice.get("message"))
+    if not message:
+        return None
+    assistant_message: dict[str, Any] = {"role": "assistant"}
+    if message.get("content") is not None:
+        assistant_message["content"] = str(message.get("content"))
+    if isinstance(message.get("tool_calls"), list):
+        assistant_message["tool_calls"] = message["tool_calls"]
+    return assistant_message
 
 
 def _anthropic_tools(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -438,6 +575,35 @@ def _normalize_openai_response(response: dict[str, Any]) -> ProviderTurnResponse
     )
 
 
+def _normalize_openai_chat_completion_response(response: dict[str, Any]) -> ProviderTurnResponse:
+    choice = _first_chat_choice(response)
+    message = _dict(choice.get("message")) if choice is not None else {}
+    tool_requests: list[NormalizedToolRequest] = []
+    final_answer: dict[str, Any] | None = None
+
+    for item in _object_list(message.get("tool_calls", []), "choices.message.tool_calls"):
+        function = _dict(item.get("function"))
+        tool_requests.append(
+            NormalizedToolRequest(
+                id=_optional_str(item.get("id")),
+                name=_required_str(function, "name"),
+                arguments=_object_arguments(function.get("arguments")),
+            )
+        )
+
+    content = message.get("content")
+    if content is not None:
+        final_answer = _json_object_from_text(str(content))
+
+    return ProviderTurnResponse(
+        tool_requests=tool_requests,
+        final_answer=final_answer,
+        usage=_openai_chat_usage(response.get("usage", {})),
+        stop_reason=_optional_str(choice.get("finish_reason") if choice else None),
+        raw=_allowlisted_raw(response, ("id", "object", "model", "created")),
+    )
+
+
 def _normalize_anthropic_response(response: dict[str, Any]) -> ProviderTurnResponse:
     content = _list_field(response, "content")
     tool_requests: list[NormalizedToolRequest] = []
@@ -453,7 +619,7 @@ def _normalize_anthropic_response(response: dict[str, Any]) -> ProviderTurnRespo
                 )
             )
         elif item_type == "text":
-            final_answer = _json_object(str(item.get("text", ""))) or final_answer
+            final_answer = _json_object_from_text(str(item.get("text", ""))) or final_answer
 
     return ProviderTurnResponse(
         tool_requests=tool_requests,
@@ -481,6 +647,22 @@ def _openai_usage(raw_usage: object) -> NormalizedModelUsage:
     )
 
 
+def _openai_chat_usage(raw_usage: object) -> NormalizedModelUsage:
+    usage = _dict(raw_usage)
+    prompt_details = _dict(usage.get("prompt_tokens_details", {}))
+    return NormalizedModelUsage(
+        input_tokens=_optional_int(usage.get("prompt_tokens"), "usage.prompt_tokens"),
+        output_tokens=_optional_int(
+            usage.get("completion_tokens"),
+            "usage.completion_tokens",
+        ),
+        cache_read_tokens=_optional_int(
+            prompt_details.get("cached_tokens"),
+            "usage.prompt_tokens_details.cached_tokens",
+        ),
+    )
+
+
 def _anthropic_usage(raw_usage: object) -> NormalizedModelUsage:
     usage = _dict(raw_usage)
     return NormalizedModelUsage(
@@ -500,10 +682,17 @@ def _anthropic_usage(raw_usage: object) -> NormalizedModelUsage:
 def _first_json_text(content: object) -> dict[str, Any] | None:
     for item in _object_list(content, "message.content"):
         if str(item.get("type", "")) in {"output_text", "text"}:
-            parsed = _json_object(str(item.get("text", "")))
+            parsed = _json_object_from_text(str(item.get("text", "")))
             if parsed is not None:
                 return parsed
     return None
+
+
+def _first_chat_choice(response: dict[str, Any]) -> dict[str, Any] | None:
+    choices = _object_list(response.get("choices", []), "choices")
+    if not choices:
+        return None
+    return choices[0]
 
 
 def _json_object(value: str) -> dict[str, Any] | None:
@@ -514,6 +703,32 @@ def _json_object(value: str) -> dict[str, Any] | None:
     if not isinstance(parsed, dict):
         raise ProviderAdapterError("final answer text must decode to a JSON object")
     return parsed
+
+
+def _json_object_from_text(value: str) -> dict[str, Any] | None:
+    parsed = _json_object(value)
+    if parsed is not None:
+        return parsed
+
+    stripped = value.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if len(lines) >= 3 and lines[-1].strip() == "```":
+            parsed = _json_object("\n".join(lines[1:-1]))
+            if parsed is not None:
+                return parsed
+
+    decoder = json.JSONDecoder()
+    for index, character in enumerate(value):
+        if character != "{":
+            continue
+        try:
+            candidate, _ = decoder.raw_decode(value[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            return candidate
+    return None
 
 
 def _object_arguments(value: object) -> dict[str, Any]:

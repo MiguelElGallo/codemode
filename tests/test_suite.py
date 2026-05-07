@@ -321,6 +321,159 @@ def test_suite_warm_cache_policy_marks_configured_warmup_repetitions() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "cache_policy",
+    [CachePolicy.UNSPECIFIED, CachePolicy.DISABLED],
+)
+def test_suite_rejects_warmup_repetitions_for_non_warm_cache_policies(
+    cache_policy: CachePolicy,
+) -> None:
+    config = BenchmarkSuiteConfig(
+        arms=("deterministic_oracle",),
+        cache_policy=cache_policy,
+        cache_warmup_repetitions=1,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="cache_warmup_repetitions requires warm or cold_then_warm cache policy",
+    ):
+        config.validate_arms()
+
+
+def test_suite_rejects_cold_policy_with_warmup_repetitions() -> None:
+    config = BenchmarkSuiteConfig(
+        arms=("deterministic_oracle",),
+        cache_policy=CachePolicy.COLD,
+        cache_warmup_repetitions=1,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="cache_warmup_repetitions requires warm or cold_then_warm cache policy",
+    ):
+        config.validate_arms()
+
+
+def test_suite_rejects_multi_repetition_cold_policy_without_cache_busting() -> None:
+    config = BenchmarkSuiteConfig(
+        arms=("deterministic_oracle",),
+        repetitions=2,
+        cache_policy=CachePolicy.COLD,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="cold cache policy requires exactly one repetition",
+    ):
+        config.validate_arms()
+
+
+def test_suite_rejects_warm_policy_without_warmup_repetition() -> None:
+    config = BenchmarkSuiteConfig(
+        arms=("deterministic_oracle",),
+        repetitions=2,
+        cache_policy=CachePolicy.WARM,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="warm cache policy requires at least one warmup repetition",
+    ):
+        config.validate_arms()
+
+
+def test_suite_rejects_warm_policy_when_every_repetition_is_warmup() -> None:
+    config = BenchmarkSuiteConfig(
+        arms=("deterministic_oracle",),
+        repetitions=2,
+        cache_policy=CachePolicy.WARM,
+        cache_warmup_repetitions=2,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="warm cache policy must leave at least one measured warm repetition",
+    ):
+        config.validate_arms()
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        BenchmarkSuiteConfig(
+            arms=("deterministic_oracle",),
+            repetitions=2,
+            cache_policy=CachePolicy.WARM,
+            cache_warmup_repetitions=1,
+        ),
+        BenchmarkSuiteConfig(
+            arms=("deterministic_oracle",),
+            repetitions=2,
+            cache_policy=CachePolicy.COLD_THEN_WARM,
+            cache_warmup_repetitions=0,
+        ),
+    ],
+)
+def test_suite_accepts_minimal_valid_warm_cache_boundaries(
+    config: BenchmarkSuiteConfig,
+) -> None:
+    config.validate_arms()
+
+
+def test_suite_rejects_invalid_cache_controls_before_constructing_executors() -> None:
+    calls: list[str] = []
+
+    def fake_executor_factory(arm: str, task: ProbeTask) -> SimpleNamespace:
+        calls.append(arm)
+        return SimpleNamespace(name=arm)
+
+    with pytest.raises(
+        ValueError,
+        match="warm cache policy requires at least one warmup repetition",
+    ):
+        run_benchmark_suite(
+            [tiny_task("invalid-cache-suite", seed=1)],
+            BenchmarkSuiteConfig(
+                arms=("deterministic_oracle",),
+                repetitions=2,
+                cache_policy=CachePolicy.WARM,
+            ),
+            executor_factory=fake_executor_factory,
+        )
+
+    assert calls == []
+
+
+def test_suite_rejects_cold_then_warm_without_measured_warm_repetition() -> None:
+    config = BenchmarkSuiteConfig(
+        arms=("deterministic_oracle",),
+        repetitions=3,
+        cache_policy=CachePolicy.COLD_THEN_WARM,
+        cache_warmup_repetitions=2,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="cold_then_warm cache policy must leave at least one measured warm repetition",
+    ):
+        config.validate_arms()
+
+
+def test_suite_rejects_cold_then_warm_single_repetition() -> None:
+    config = BenchmarkSuiteConfig(
+        arms=("deterministic_oracle",),
+        repetitions=1,
+        cache_policy=CachePolicy.COLD_THEN_WARM,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="cold_then_warm cache policy requires at least two repetitions",
+    ):
+        config.validate_arms()
+
+
 def test_suite_builds_fresh_direct_mcp_agent_parallel_executor_per_repetition() -> None:
     task = tiny_task("direct-agent-suite", tool_shape=ToolShape.BATCH)
 

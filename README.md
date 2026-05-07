@@ -75,14 +75,15 @@ uv run python -m codemode_probe.cli \
 ## Run A Live Provider Smoke
 
 Install provider extras, export the Azure OpenAI API key and endpoint, and use strict budget
-guards. Fill the pricing and documentation source IDs from
+guards. The Azure endpoint may be either the resource base URL or the full
+deployment chat-completions URL from Azure AI Foundry. Fill the pricing and documentation source IDs from
 [docs/evidence_register.md](docs/evidence_register.md) before treating cost rows
 as source-backed. `--provider-model` is the Azure OpenAI deployment name.
 
 ```console
 uv sync --extra providers
 export AZURE_OPENAI_API_KEY=...
-export AZURE_OPENAI_ENDPOINT="https://foundry-argus.cognitiveservices.azure.com/"
+export AZURE_OPENAI_ENDPOINT="https://<resource>.cognitiveservices.azure.com/openai/deployments/<deployment>/chat/completions?api-version=2025-01-01-preview"
 uv run --extra providers python -m codemode_probe.cli \
   --preset smoke \
   --arms direct_agent \
@@ -92,7 +93,7 @@ uv run --extra providers python -m codemode_probe.cli \
   --provider-api-key-env-var AZURE_OPENAI_API_KEY \
   --provider-endpoint-env-var AZURE_OPENAI_ENDPOINT \
   --provider-model-version gpt-4.1-mini \
-  --provider-api-version 2024-12-01-preview \
+  --provider-api-version 2025-01-01-preview \
   --provider-sdk-version <installed-openai-version> \
   --provider-pricing-source-id openai-gpt-4-1-mini-docs-2026-05-06 \
   --provider-model-docs-source-id openai-gpt-4-1-mini-docs-2026-05-06 \
@@ -167,9 +168,10 @@ Optional provider settings can be recorded without credentials by passing
 `--provider`, `--provider-model`, and `--provider-dry-run`. Without
 `--provider-dry-run`, provider configs require `--enable-live` and pass SDK plus
 API-key environment checks before any run artifacts are created. Live provider
-turns use provider-native tool-calling transcripts: OpenAI/Azure OpenAI
-Responses API `function_call_output` items and Anthropic Messages API
-`tool_result` blocks.
+turns use provider-native tool-calling transcripts: OpenAI Responses API
+`function_call_output` items, Azure OpenAI chat-completions tool messages when
+the endpoint is a deployment chat URL, and Anthropic Messages API `tool_result`
+blocks.
 
 Optional budget guards can be set with `--max-run-seconds`,
 `--max-model-requests`, `--max-input-tokens`, `--max-output-tokens`, and
@@ -194,7 +196,11 @@ Payload suppression is:
 
 Cache cohorts are recorded in `results.jsonl`, `manifest.json`, and
 `cache_cohorts.json`. Provider adapters are still responsible for enforcing any
-real provider-side cache behavior.
+real provider-side cache behavior. Cache warmup repetitions are only valid with
+`warm` or `cold_then_warm` cache policies, and those configurations must leave
+at least one measured warm repetition outside warmup rows. `warm` requires at
+least one warmup repetition; `cold` is restricted to one repetition until cache
+busting is implemented.
 
 `pairing_coverage.json` records how many trial groups had the configured
 paired-delta baseline, how many comparison results were paired, and how many

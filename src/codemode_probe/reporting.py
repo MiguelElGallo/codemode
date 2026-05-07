@@ -149,6 +149,16 @@ def collect_run_warnings(
                 "Provider config is missing pricing evidence fields; cost claims are not source-backed.",
                 {"missing_fields": missing_pricing_fields},
             )
+        elif (
+            provider_config.provider.value == "azure_openai"
+            and str(provider_config.pricing_source_id).startswith("openai-")
+        ):
+            add(
+                "azure_pricing_source_not_verified",
+                "warning",
+                "Azure OpenAI run uses non-Azure pricing evidence; treat cost estimates as assumption-backed, not Azure billing evidence.",
+                {"pricing_source_id": provider_config.pricing_source_id},
+            )
 
     if preflight_results is None:
         add(

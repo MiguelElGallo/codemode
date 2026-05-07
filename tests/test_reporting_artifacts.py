@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 
 from codemode_probe.artifacts import write_run_artifacts
@@ -17,7 +18,7 @@ from codemode_probe.models import (
     UsageStats,
 )
 from codemode_probe.preflight import PreflightCheckResult
-from codemode_probe.provider_config import openai_config
+from codemode_probe.provider_config import azure_openai_config, openai_config
 from codemode_probe.reporting import (
     collect_run_warnings,
     render_summary_markdown,
@@ -912,6 +913,45 @@ def test_collect_run_warnings_flags_claim_readiness_gaps() -> None:
             "pricing_snapshot_date",
             "currency",
         ]
+    }
+
+
+def test_collect_run_warnings_flags_azure_runs_using_openai_pricing_evidence() -> None:
+    warnings = collect_run_warnings(
+        [_result("direct_mcp_agent_parallel", trial_id="trial-1")],
+        provider_config=azure_openai_config(
+            model="gpt-4.1-mini",
+            enabled=True,
+            model_version="gpt-4.1-mini",
+            api_version="2025-01-01-preview",
+            sdk_version="2.0.0",
+            pricing_source_id="openai-gpt-4-1-mini-docs-2026-05-06",
+            model_docs_source_id="openai-gpt-4-1-mini-docs-2026-05-06",
+            pricing_snapshot_date=date(2026, 5, 6),
+            currency="USD",
+        ),
+        suite_config=BenchmarkSuiteConfig(
+            arms=("direct_agent",),
+            repetitions=3,
+        ),
+        preflight_results=[
+            PreflightCheckResult(name="preflight-a", passed=True, details={})
+        ],
+        paired_baseline_arm="direct_mcp_agent_parallel",
+    )
+
+    by_id = {warning["id"]: warning for warning in warnings}
+
+    assert by_id["azure_pricing_source_not_verified"] == {
+        "id": "azure_pricing_source_not_verified",
+        "severity": "warning",
+        "message": (
+            "Azure OpenAI run uses non-Azure pricing evidence; treat cost estimates as "
+            "assumption-backed, not Azure billing evidence."
+        ),
+        "details": {
+            "pricing_source_id": "openai-gpt-4-1-mini-docs-2026-05-06",
+        },
     }
 
 

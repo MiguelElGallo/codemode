@@ -66,7 +66,11 @@ in `manifest.json`.
 
 Cache policy fields are cohort labels unless a live provider or Code Mode
 adapter explicitly enforces provider-side cache state. Warmup rows should not be
-used as headline measurements for warm-cache claims.
+used as headline measurements for warm-cache claims. Warmup repetitions are
+valid only for `warm` and `cold_then_warm` policies, and every warm-cache
+configuration must leave at least one measured warm repetition after warmup.
+`warm` requires at least one warmup repetition. `cold` is limited to one
+repetition until an adapter explicitly implements cache busting or isolation.
 
 Budget controls are pre-run guards, not measured usage. When configured, they
 are evaluated before live provider validation and before artifact creation.

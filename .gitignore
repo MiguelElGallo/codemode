@@ -149,7 +149,10 @@ activemq-data/
 
 # Environments
 .env
+.env.*
+!.env.example
 .envrc
+env.local
 .venv
 env/
 venv/
@@ -205,6 +208,9 @@ tempCodeRunnerFile.py
 
 # Ruff stuff:
 .ruff_cache/
+
+# Benchmark artifacts
+benchmarks/outputs/
 
 # PyPI configuration file
 .pypirc
