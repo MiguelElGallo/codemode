@@ -27,6 +27,9 @@ def build_provider_client(
     if config.provider == LiveProvider.OPENAI:
         transport = transport or OpenAISdkTransport(config)
         return OpenAIProviderClient(config, transport)
+    if config.provider == LiveProvider.AZURE_OPENAI:
+        transport = transport or AzureOpenAISdkTransport(config)
+        return AzureOpenAIProviderClient(config, transport)
     if config.provider == LiveProvider.ANTHROPIC:
         transport = transport or AnthropicSdkTransport(config)
         return AnthropicProviderClient(config, transport)
@@ -44,6 +47,10 @@ class OpenAIProviderClient:
     async def run_provider_turn(self, request: ProviderTurnRequest) -> ProviderTurnResponse:
         response = await self._transport.send_turn(_provider_payload(self._config, request))
         return _normalize_openai_response(response)
+
+
+class AzureOpenAIProviderClient(OpenAIProviderClient):
+    provider_name = "azure_openai"
 
 
 class AnthropicProviderClient:
@@ -105,6 +112,26 @@ class OpenAISdkTransport:
         if response_dict.get("id") is not None:
             state["previous_response_id"] = str(response_dict["id"])
         return response_dict
+
+
+class AzureOpenAISdkTransport(OpenAISdkTransport):
+    def __init__(self, config: LiveProviderConfig) -> None:
+        self._config = config
+        self._state: dict[str, dict[str, Any]] = {}
+        module = importlib.import_module("openai")
+        async_client = getattr(module, "AsyncAzureOpenAI", None)
+        if async_client is None:
+            raise ProviderConfigError(
+                "optional SDK package 'openai' does not expose AsyncAzureOpenAI"
+            )
+        if not config.api_version:
+            raise ProviderConfigError("Azure OpenAI requires provider api_version")
+        self._client = async_client(
+            api_key=_api_key(config),
+            azure_endpoint=_endpoint(config),
+            api_version=config.api_version,
+            timeout=config.timeout_seconds,
+        )
 
 
 class AnthropicSdkTransport:
@@ -195,6 +222,17 @@ def _api_key(config: LiveProviderConfig) -> str:
     if not value:
         raise ProviderConfigError(
             f"required API key environment variable '{config.api_key_env_var}' is not set"
+        )
+    return value
+
+
+def _endpoint(config: LiveProviderConfig) -> str:
+    if config.endpoint_env_var is None:
+        raise ProviderConfigError("provider endpoint_env_var is required")
+    value = os.environ.get(config.endpoint_env_var)
+    if not value:
+        raise ProviderConfigError(
+            f"required endpoint environment variable '{config.endpoint_env_var}' is not set"
         )
     return value
 

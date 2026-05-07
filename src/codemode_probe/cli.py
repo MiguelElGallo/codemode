@@ -87,6 +87,11 @@ def main() -> None:
         help="Environment variable name that will hold the provider API key.",
     )
     parser.add_argument(
+        "--provider-endpoint-env-var",
+        default=None,
+        help="Environment variable name that holds the provider endpoint for Azure OpenAI.",
+    )
+    parser.add_argument(
         "--provider-timeout-seconds",
         type=float,
         default=60.0,
@@ -216,9 +221,15 @@ def _provider_config_from_args(args: argparse.Namespace) -> LiveProviderConfig |
     if provider == LiveProvider.OPENAI:
         default_model = "gpt-4.1-mini"
         default_env_var = "OPENAI_API_KEY"
+        default_endpoint_env_var = None
+    elif provider == LiveProvider.AZURE_OPENAI:
+        default_model = "gpt-4.1-mini"
+        default_env_var = "AZURE_OPENAI_API_KEY"
+        default_endpoint_env_var = "AZURE_OPENAI_ENDPOINT"
     elif provider == LiveProvider.ANTHROPIC:
         default_model = "claude-sonnet-4-5"
         default_env_var = "ANTHROPIC_API_KEY"
+        default_endpoint_env_var = None
     else:
         raise ValueError(f"unsupported provider: {provider}")
     return LiveProviderConfig(
@@ -226,6 +237,7 @@ def _provider_config_from_args(args: argparse.Namespace) -> LiveProviderConfig |
         model=args.provider_model or default_model,
         enabled=args.enable_live,
         api_key_env_var=args.provider_api_key_env_var or default_env_var,
+        endpoint_env_var=args.provider_endpoint_env_var or default_endpoint_env_var,
         timeout_seconds=args.provider_timeout_seconds,
         temperature=args.provider_temperature,
         model_version=args.provider_model_version,

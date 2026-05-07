@@ -11,6 +11,7 @@ from codemode_probe.provider_config import (
     LiveProvider,
     ProviderConfigError,
     anthropic_config,
+    azure_openai_config,
     openai_config,
 )
 
@@ -26,6 +27,7 @@ def test_openai_config_defaults_to_disabled_live_provider() -> None:
     assert config.model == "gpt-4.1-mini"
     assert config.enabled is False
     assert config.api_key_env_var == "OPENAI_API_KEY"
+    assert config.endpoint_env_var is None
     assert config.timeout_seconds == 60.0
     assert config.temperature == 0.0
     assert config.sdk_package == "openai"
@@ -45,6 +47,7 @@ def test_anthropic_config_defaults_to_disabled_live_provider() -> None:
     assert config.model == "claude-sonnet-4-5"
     assert config.enabled is False
     assert config.api_key_env_var == "ANTHROPIC_API_KEY"
+    assert config.endpoint_env_var is None
     assert config.timeout_seconds == 60.0
     assert config.temperature == 0.0
     assert config.sdk_package == "anthropic"
@@ -74,6 +77,7 @@ def test_provider_config_serializes_reproducibility_evidence_fields() -> None:
         "model": "gpt-test",
         "enabled": False,
         "api_key_env_var": "OPENAI_API_KEY",
+        "endpoint_env_var": None,
         "timeout_seconds": 60.0,
         "temperature": 0.0,
         "model_version": "2026-04-01",
@@ -84,6 +88,34 @@ def test_provider_config_serializes_reproducibility_evidence_fields() -> None:
         "pricing_snapshot_date": "2026-05-06",
         "currency": "USD",
     }
+
+
+def test_azure_openai_config_defaults_to_disabled_live_provider() -> None:
+    config = azure_openai_config()
+
+    assert config.provider == LiveProvider.AZURE_OPENAI
+    assert config.model == "gpt-4.1-mini"
+    assert config.enabled is False
+    assert config.api_key_env_var == "AZURE_OPENAI_API_KEY"
+    assert config.endpoint_env_var == "AZURE_OPENAI_ENDPOINT"
+    assert config.sdk_package == "openai"
+
+
+def test_azure_openai_config_requires_endpoint_env_var_after_sdk_and_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "importlib.util.find_spec",
+        lambda package: importlib.machinery.ModuleSpec(package, loader=None),
+    )
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-key")
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+
+    with pytest.raises(
+        ProviderConfigError,
+        match="required endpoint environment variable 'AZURE_OPENAI_ENDPOINT' is not set",
+    ):
+        azure_openai_config(enabled=True).validate_for_live_use()
 
 
 def test_disabled_live_config_errors_before_sdk_or_env_checks(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -127,6 +159,7 @@ def test_missing_env_var_error_after_sdk_presence(monkeypatch: pytest.MonkeyPatc
     ("config", "package", "env_var"),
     [
         (openai_config(enabled=True), "openai", "OPENAI_API_KEY"),
+        (azure_openai_config(enabled=True), "openai", "AZURE_OPENAI_API_KEY"),
         (anthropic_config(enabled=True), "anthropic", "ANTHROPIC_API_KEY"),
     ],
 )
@@ -144,6 +177,8 @@ def test_env_var_success_path_with_mocked_sdk_presence(
 
     monkeypatch.setattr("importlib.util.find_spec", fake_find_spec)
     monkeypatch.setenv(env_var, "test-key")
+    if config.endpoint_env_var is not None:
+        monkeypatch.setenv(config.endpoint_env_var, "https://example.openai.azure.com/")
 
     config.validate_for_live_use()
 

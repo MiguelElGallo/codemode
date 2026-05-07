@@ -414,6 +414,7 @@ def test_write_run_artifacts_manifest_includes_provider_config_when_provided(
         "model": "claude-test",
         "enabled": False,
         "api_key_env_var": "ANTHROPIC_TEST_KEY",
+        "endpoint_env_var": None,
         "timeout_seconds": 12.5,
         "temperature": 0.2,
         "model_version": "2026-02-14",
@@ -626,6 +627,7 @@ def test_cli_provider_dry_run_records_config_without_sdk_or_env_checks(
         "model": "gpt-test",
         "enabled": False,
         "api_key_env_var": "OPENAI_TEST_KEY",
+        "endpoint_env_var": None,
         "timeout_seconds": 9.5,
         "temperature": 0.1,
         "model_version": "2026-04-01",
@@ -659,6 +661,52 @@ def test_cli_provider_without_dry_run_requires_explicit_live_enable_before_artif
         main()
 
     assert not (tmp_path / "provider-disabled").exists()
+
+
+def test_cli_azure_openai_provider_dry_run_records_endpoint_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+
+    def fail_find_spec(package: str) -> None:
+        raise AssertionError(f"dry-run should not inspect SDK package {package}")
+
+    monkeypatch.setattr("importlib.util.find_spec", fail_find_spec)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "codemode-probe",
+            "--out",
+            str(tmp_path),
+            "--run-id",
+            "azure-provider-dry-run",
+            "--skip-preflight",
+            "--provider",
+            "azure_openai",
+            "--provider-model",
+            "deployment-test",
+            "--provider-api-key-env-var",
+            "AZURE_OPENAI_API_KEY",
+            "--provider-endpoint-env-var",
+            "AZURE_OPENAI_ENDPOINT",
+            "--provider-api-version",
+            "2024-12-01-preview",
+            "--provider-dry-run",
+        ],
+    )
+
+    main()
+
+    manifest = json.loads(
+        (tmp_path / "azure-provider-dry-run" / "manifest.json").read_text()
+    )
+    assert manifest["provider"]["provider"] == "azure_openai"
+    assert manifest["provider"]["model"] == "deployment-test"
+    assert manifest["provider"]["api_key_env_var"] == "AZURE_OPENAI_API_KEY"
+    assert manifest["provider"]["endpoint_env_var"] == "AZURE_OPENAI_ENDPOINT"
+    assert manifest["provider"]["api_version"] == "2024-12-01-preview"
+    assert manifest["claim_scope"] == "dry_run_provider_config"
 
 
 def test_cli_live_provider_requires_compatible_sdk_before_artifacts(

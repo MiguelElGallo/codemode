@@ -21,12 +21,14 @@ from codemode_probe.provider import ProviderTurnRequest
 from codemode_probe.provider_adapters import (
     AnthropicProviderClient,
     AnthropicSdkTransport,
+    AzureOpenAIProviderClient,
+    AzureOpenAISdkTransport,
     OpenAIProviderClient,
     OpenAISdkTransport,
     ProviderAdapterError,
     build_provider_client,
 )
-from codemode_probe.provider_config import anthropic_config, openai_config
+from codemode_probe.provider_config import anthropic_config, azure_openai_config, openai_config
 from codemode_probe.workload import make_probe_task
 
 
@@ -221,6 +223,18 @@ def test_provider_client_factory_uses_explicit_transport() -> None:
     )
 
     assert isinstance(client, OpenAIProviderClient)
+
+
+def test_provider_client_factory_uses_azure_provider_client_with_explicit_transport() -> None:
+    transport = RecordingTransport({"output": []})
+
+    client = build_provider_client(
+        azure_openai_config(model="deployment-test", enabled=True),
+        transport=transport,
+    )
+
+    assert isinstance(client, AzureOpenAIProviderClient)
+    assert client.provider_name == "azure_openai"
 
 
 def test_provider_adapters_reject_malformed_tool_arguments() -> None:
@@ -437,6 +451,51 @@ def test_openai_sdk_transport_sends_new_tool_outputs_with_previous_response_id(
             "output": '[{"id":"cand-1"}]',
         }
     ]
+
+
+def test_azure_openai_sdk_transport_builds_client_with_endpoint_and_api_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = {}
+
+    class FakeResponses:
+        async def create(self, **kwargs):
+            created.setdefault("requests", []).append(kwargs)
+            return {"id": "azure-resp-1", "status": "completed", "output": []}
+
+    class FakeAsyncAzureOpenAI:
+        def __init__(self, **kwargs):
+            created["client"] = kwargs
+            self.responses = FakeResponses()
+
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "azure-key")
+    monkeypatch.setenv(
+        "AZURE_OPENAI_ENDPOINT",
+        "https://foundry-argus.cognitiveservices.azure.com/",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "openai",
+        SimpleNamespace(AsyncAzureOpenAI=FakeAsyncAzureOpenAI),
+    )
+
+    transport = AzureOpenAISdkTransport(
+        azure_openai_config(
+            model="deployment-test",
+            enabled=True,
+            api_version="2024-12-01-preview",
+        )
+    )
+    response = asyncio.run(transport.send_turn(_payload_from_tiny_request("azure_openai")))
+
+    assert created["client"] == {
+        "api_key": "azure-key",
+        "azure_endpoint": "https://foundry-argus.cognitiveservices.azure.com/",
+        "api_version": "2024-12-01-preview",
+        "timeout": 60.0,
+    }
+    assert created["requests"][0]["model"] == "deployment-test"
+    assert response["id"] == "azure-resp-1"
 
 
 def test_openai_sdk_transport_resets_state_between_repeated_task_executions(

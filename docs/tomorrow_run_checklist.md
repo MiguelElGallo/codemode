@@ -27,7 +27,8 @@ source-backed external evidence.
 ## 3. Export Credentials
 
 ```bash
-export OPENAI_API_KEY=...
+export AZURE_OPENAI_API_KEY=...
+export AZURE_OPENAI_ENDPOINT="https://foundry-argus.cognitiveservices.azure.com/"
 ```
 
 Do not put API keys in CLI arguments, config files, artifacts, or commit
@@ -37,17 +38,19 @@ safe path is to keep secrets only in environment variables.
 ## 4. Run A Bounded Smoke
 
 Replace placeholders before running.
+`--provider-model` is the Azure OpenAI deployment name, not the base model name.
 
 ```bash
 uv run --extra providers python -m codemode_probe.cli \
   --preset smoke \
   --arms direct_agent \
   --repetitions 1 \
-  --provider openai \
-  --provider-model gpt-4.1-mini \
-  --provider-api-key-env-var OPENAI_API_KEY \
+  --provider azure_openai \
+  --provider-model <azure-deployment-name> \
+  --provider-api-key-env-var AZURE_OPENAI_API_KEY \
+  --provider-endpoint-env-var AZURE_OPENAI_ENDPOINT \
   --provider-model-version gpt-4.1-mini \
-  --provider-api-version responses-v1 \
+  --provider-api-version 2024-12-01-preview \
   --provider-sdk-version <installed-openai-version> \
   --provider-pricing-source-id openai-gpt-4-1-mini-docs-2026-05-06 \
   --provider-model-docs-source-id openai-gpt-4-1-mini-docs-2026-05-06 \
